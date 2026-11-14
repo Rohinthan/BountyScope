@@ -75,15 +75,35 @@ To eliminate accidental out-of-scope network transmission, BountyScope implement
 
 ---
 
-## SQLite Storage Schema
+## Scoped HTTP Client (`ScopedHttpClient`)
 
-All assessment data, mapped surface endpoints, and verified findings are persisted in a local, single-file SQLite database. SQLite write-ahead logging (WAL) mode is enabled to support concurrent read operations while maintaining data integrity.
+The outbound HTTP dispatcher enforces strict security invariants at the transport layer:
+
+1. **Compile-Time Target Verification:** `ScopedHttpClient::get(&self, target: &VerifiedScopeUrl)` strictly accepts verified tokens. Raw string or untrusted URL invocations fail compilation.
+2. **Prohibition of Automatic Redirects:** Configured with `reqwest::redirect::Policy::none()`. If a remote host responds with an HTTP 301, 302, 307, or 308 redirect, the client captures the `Location` header in `HttpProbeResponse::redirect_location` without following it. Callers must pass any redirect target back through the `ScopeEnforcer` before dispatching a subsequent probe, preventing redirect-based scope escapes.
+3. **Deterministic Inter-Request Rate Limiting:** Enforces minimum inter-request spacing derived from `rate_limit_rps` (e.g., 2 rps = 500 ms minimum interval) across concurrent tasks using internal mutex scheduling.
+4. **Mandatory Audit Trail:** Every outbound request attempts and completions are logged synchronously into the SQLite `audit_logs` table.
+
+---
+
+## SQLite Storage Schema & Pragmas
+
+All assessment data, mapped surface endpoints, and verified findings are persisted in a local, single-file SQLite database. 
+
+### Mandatory Connection Pragmas
+On opening every connection, the storage engine immediately executes:
+```sql
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+```
+- **Write-Ahead Logging (WAL):** Supports concurrent reader tasks without blocking active single-writer transactions.
+- **Foreign Key Constraints (`ON`):** Prevents orphan scope rules, findings, or audit entries. Any attempt to record interaction data against non-existent program IDs fails immediately.
 
 ```sql
 -- Target scope metadata
 CREATE TABLE IF NOT EXISTS programs (
     id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
+    name TEXT NOT NULL UNIQUE,
     platform TEXT NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP

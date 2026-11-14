@@ -18,6 +18,7 @@ fn default_safe_mode() -> bool {
 
 /// Target scope configuration defining allowed boundaries and execution constraints.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeConfig {
     pub program_name: String,
     pub platform: String,
@@ -63,6 +64,13 @@ impl ScopeConfig {
 
         if self.rate_limit_rps == 0 || self.rate_limit_rps > MAX_RATE_LIMIT_RPS {
             return Err(ScopeError::InvalidRateLimit(self.rate_limit_rps));
+        }
+
+        if !self.safe_mode {
+            return Err(ScopeError::InvalidConfiguration(
+                "safe_mode must be set to true: destructive modes are prohibited by policy"
+                    .to_string(),
+            ));
         }
 
         Ok(())
@@ -193,11 +201,12 @@ impl ScopeEnforcer {
             return Err(ScopeError::DomainNotAllowed(host));
         }
 
-        // Check path exclusions
-        let path = parsed.path();
+        // Check path exclusions with lexical normalization
+        let normalized = normalize_path(parsed.path());
         for excluded_path in &self.config.excluded_paths {
-            if matches_path_pattern(excluded_path, path) {
-                return Err(ScopeError::PathExcluded(path.to_string()));
+            let norm_excluded = normalize_path(excluded_path);
+            if matches_path_pattern(&norm_excluded, &normalized) {
+                return Err(ScopeError::PathExcluded(normalized));
             }
         }
 
@@ -222,17 +231,19 @@ impl ScopeEnforcer {
 
     /// Checks if a candidate path matches any excluded path rule.
     pub fn is_path_excluded(&self, path: &str) -> bool {
-        self.config
-            .excluded_paths
-            .iter()
-            .any(|excluded| matches_path_pattern(excluded, path))
+        let norm_path = normalize_path(path);
+        self.config.excluded_paths.iter().any(|excluded| {
+            let norm_excluded = normalize_path(excluded);
+            matches_path_pattern(&norm_excluded, &norm_path)
+        })
     }
 }
 
 /// Evaluates whether a host matches a domain rule (exact match or wildcard `*.domain.tld`).
+/// Normalizes trailing dots on both pattern and host.
 fn matches_domain_pattern(pattern: &str, host: &str) -> bool {
-    let pattern_clean = pattern.trim().to_ascii_lowercase();
-    let host_clean = host.trim().to_ascii_lowercase();
+    let pattern_clean = pattern.trim().trim_end_matches('.').to_ascii_lowercase();
+    let host_clean = host.trim().trim_end_matches('.').to_ascii_lowercase();
 
     if pattern_clean == host_clean {
         return true;
@@ -273,6 +284,31 @@ fn matches_path_pattern(pattern: &str, path: &str) -> bool {
     path.starts_with(&prefix_with_slash)
 }
 
+/// Lexically normalizes a URL path by decoding percent-encoded characters,
+/// collapsing multiple slashes, and resolving `.` and `..` traversal segments.
+pub fn normalize_path(raw_path: &str) -> String {
+    let decoded = percent_encoding::percent_decode_str(raw_path).decode_utf8_lossy();
+
+    let mut segments: Vec<&str> = Vec::new();
+    for seg in decoded.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            s => {
+                segments.push(s);
+            }
+        }
+    }
+
+    if segments.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", segments.join("/"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,7 +323,11 @@ mod tests {
                 "127.0.0.1".to_string(),
             ],
             excluded_domains: vec!["auth.example.com".to_string()],
-            excluded_paths: vec!["/logout".to_string(), "/delete-account".to_string()],
+            excluded_paths: vec![
+                "/logout".to_string(),
+                "/delete-account".to_string(),
+                "/admin".to_string(),
+            ],
             rate_limit_rps: 2,
             safe_mode: true,
         }
@@ -326,6 +366,23 @@ mod tests {
         assert!(matches!(
             enforcer.validate_url("https://attacker-example.com/"),
             Err(ScopeError::DomainNotAllowed(_))
+        ));
+    }
+
+    #[test]
+    fn test_trailing_dot_domain_normalization() {
+        let config = create_test_config();
+        let enforcer = ScopeEnforcer::new(config).expect("failed to create enforcer");
+
+        // FQDN with trailing dot should match allowed domain
+        assert!(enforcer
+            .validate_url("https://api.example.com./status")
+            .is_ok());
+
+        // Trailing-dot on excluded domain should be properly caught and excluded
+        assert!(matches!(
+            enforcer.validate_url("https://auth.example.com./login"),
+            Err(ScopeError::DomainExcluded(_))
         ));
     }
 
@@ -378,6 +435,47 @@ mod tests {
     }
 
     #[test]
+    fn test_path_normalization_and_traversal_rejection() {
+        let config = create_test_config();
+        let enforcer = ScopeEnforcer::new(config).expect("failed to create enforcer");
+
+        // Consecutive slashes
+        assert!(matches!(
+            enforcer.validate_url("https://example.com//logout"),
+            Err(ScopeError::PathExcluded(_))
+        ));
+
+        // Path traversal with dot-dot
+        assert!(matches!(
+            enforcer.validate_url("https://example.com/public/../logout"),
+            Err(ScopeError::PathExcluded(_))
+        ));
+
+        // Traversal targeting excluded /admin
+        assert!(matches!(
+            enforcer.validate_url("https://example.com/public/../admin"),
+            Err(ScopeError::PathExcluded(_))
+        ));
+
+        // Percent-encoded dots
+        assert!(matches!(
+            enforcer.validate_url("https://example.com/%2e%2e/logout"),
+            Err(ScopeError::PathExcluded(_))
+        ));
+        assert!(matches!(
+            enforcer.validate_url("https://example.com/public/%2e%2e/admin/users"),
+            Err(ScopeError::PathExcluded(_))
+        ));
+
+        // Verify standalone helper
+        assert_eq!(normalize_path("//logout"), "/logout");
+        assert_eq!(normalize_path("/public/../logout"), "/logout");
+        assert_eq!(normalize_path("/%2e%2e/logout"), "/logout");
+        assert_eq!(normalize_path("/a/b/../../c"), "/c");
+        assert_eq!(normalize_path("/"), "/");
+    }
+
+    #[test]
     fn test_invalid_scheme_rejection() {
         let config = create_test_config();
         let enforcer = ScopeEnforcer::new(config).expect("failed to create enforcer");
@@ -421,5 +519,25 @@ mod tests {
             config.validate(),
             Err(ScopeError::InvalidRateLimit(101))
         ));
+
+        // safe_mode must be true
+        let mut config = create_test_config();
+        config.safe_mode = false;
+        assert!(matches!(
+            config.validate(),
+            Err(ScopeError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn test_unknown_yaml_fields_rejected() {
+        let unknown_field_yaml = r#"
+program_name: "test-corp"
+platform: "hackerone"
+allowed_domains: ["example.com"]
+unknown_setting: true
+"#;
+        let err = ScopeConfig::from_yaml_str(unknown_field_yaml);
+        assert!(matches!(err, Err(ScopeError::Yaml(_))));
     }
 }

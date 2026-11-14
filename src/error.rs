@@ -30,3 +30,35 @@ pub enum ScopeError {
     #[error("Invalid rate limit '{0}': rate limit must be between 1 and 100 requests per second")]
     InvalidRateLimit(u32),
 }
+
+/// Structured errors for SQLite storage operations.
+#[derive(Debug, Error)]
+pub enum StorageError {
+    #[error("Database error: {0}")]
+    Database(#[from] rusqlite::Error),
+
+    #[error("Storage initialization error: {0}")]
+    Initialization(String),
+
+    #[error("Entity not found: {0}")]
+    NotFound(String),
+
+    #[error("Internal storage lock failure")]
+    LockFailure,
+}
+
+/// Structured errors for HTTP probing and network interaction.
+#[derive(Debug, Error)]
+pub enum HttpError {
+    #[error("HTTP client initialization error: {0}")]
+    Initialization(String),
+
+    #[error("Network dispatch error: {0}")]
+    Network(String),
+
+    #[error("Storage error during HTTP operation: {0}")]
+    Storage(#[from] StorageError),
+
+    #[error("Scope error during HTTP operation: {0}")]
+    Scope(#[from] ScopeError),
+}

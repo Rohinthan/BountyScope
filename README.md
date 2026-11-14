@@ -11,6 +11,8 @@ BountyScope is an automated vulnerability surface mapping and passive policy ver
 
 - **Compile-Time Scope Enforcement:** Prevents unintended network calls by enforcing the `VerifiedScopeUrl` type invariant on internal HTTP clients.
 - **Strict Scope Configuration:** Validates domains, wildcard subdomains, negative path exclusions, and concurrency limits via YAML schema.
+- **Scope-Locked HTTP Client:** Outbound dispatcher strictly rejecting automatic redirects, enforcing rate limits, and recording full audit trails.
+- **Embedded SQLite Storage:** Local persistence for scope definitions, mapped endpoints, and outbound interaction audit logs with WAL mode and foreign key enforcement.
 - **Surface Mapping:** Discovers endpoints from HTML structures, scripts, and standard metadata specifications without intrusive probing.
 - **Passive Policy Auditing:** Evaluates HTTP security headers, Cross-Origin Resource Sharing (CORS) configurations, and exposed OpenAPI/Swagger documentation.
 - **Isolated Local Test Environment:** Includes an offline Ubuntu Docker lab binding services strictly to loopback (`127.0.0.1`) for safe test execution.
@@ -29,10 +31,12 @@ flowchart LR
     E -->|"Contextual Queries"| F
 ```
 
-1. **Scope Enforcer (`src/scope`):** Gateway enforcing domain, wildcard, and path boundaries, producing `VerifiedScopeUrl`.
-2. **Surface Mapper:** Passive endpoint and asset extraction engine.
-3. **Safe Verification Runner:** Non-destructive policy and configuration auditor.
-4. **AI Triage & MCP Server:** Model Context Protocol interface exposing structured findings and contextual scope queries.
+1. **Scope Enforcer (`src/scope`):** Perimeter gateway enforcing domain, wildcard, and path boundaries, producing `VerifiedScopeUrl`.
+2. **Storage Engine (`src/storage`):** Thread-safe SQLite persistence layer enforcing WAL journal mode and foreign key integrity.
+3. **Scoped HTTP Client (`src/http`):** Scope-locked network dispatcher enforcing rate limiting and non-automatic redirect handling.
+4. **Surface Mapper:** Passive endpoint and asset extraction engine.
+5. **Safe Verification Runner:** Non-destructive policy and configuration auditor.
+6. **AI Triage & MCP Server:** Model Context Protocol interface exposing structured findings and contextual scope queries.
 
 For detailed technical documentation, refer to the [Doc/](file:///home/stringray/BountyScope/Doc) directory:
 - [01_SYSTEM_OVERVIEW.md](file:///home/stringray/BountyScope/Doc/01_SYSTEM_OVERVIEW.md)
@@ -45,6 +49,7 @@ For detailed technical documentation, refer to the [Doc/](file:///home/stringray
 ## Safety Invariants
 
 - **Compile-Time Scope Lock:** Outbound HTTP clients accept only `VerifiedScopeUrl` instances. Raw strings or unchecked URLs are rejected at compile time.
+- **No Automatic Redirect Following:** HTTP 301/302/307/308 redirects are never followed implicitly. The `Location` header is captured in response metadata and must be re-validated through `ScopeEnforcer`.
 - **Zero Panics in Runtime Paths:** All error states are handled via structured error types (`thiserror` and `anyhow`). Runtime code contains zero calls to `.unwrap()`, `.expect()`, or `panic!()`.
 - **Zero Unsafe Code:** The entire codebase operates strictly under safe Rust without `unsafe` blocks.
 - **Rate-Limiting & Safe Mode:** Default request rates do not exceed 2 requests per second unless explicitly configured. Destructive payloads, brute-force loops, and denial-of-service behaviors are strictly prohibited.
@@ -102,6 +107,19 @@ Sample output:
 Scope configuration valid: example-security-program (platform: hackerone, allowed_domains: 3, excluded_domains: 3, excluded_paths: 4, rate_limit_rps: 2, safe_mode: true)
 ```
 
+### Safely Probe Target URL
+
+Validate a target URL against scope rules, dispatch a single safe GET request, and record the interaction in SQLite:
+
+```bash
+bountyscope probe --config configs/scope.example.yaml --url http://127.0.0.1:8080/openapi.json --db data/bountyscope.db
+```
+
+Sample output:
+```text
+Probe successful: http://127.0.0.1:8080/openapi.json -> HTTP 200 (application/json, 538 bytes, 3 ms)
+```
+
 ---
 
 ## Local Testing Lab
@@ -112,6 +130,7 @@ An offline local testing lab is available in `lab/` featuring OWASP Juice Shop a
 cd lab
 docker compose up -d
 bountyscope validate-scope --config configs/scope.example.yaml
+bountyscope probe --config configs/scope.example.yaml --url http://127.0.0.1:8080/openapi.json --db data/bountyscope.db
 docker compose down
 ```
 
