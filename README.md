@@ -87,6 +87,42 @@ cargo test
 
 ---
 
+## Cross-Platform Support
+
+`BountyScope` compiles natively on **Linux**, **macOS**, and **Windows** using `rustls` and bundled SQLite (`rusqlite`), requiring no external OpenSSL or system SQLite libraries at runtime.
+
+| Operating System | Architecture | Binary Output |
+| :--- | :--- | :--- |
+| **Linux** (Ubuntu, Debian, Fedora, Arch) | `x86_64`, `aarch64` | `~/.cargo/bin/bountyscope` |
+| **macOS** (Apple Silicon & Intel) | `aarch64`, `x86_64` | `~/.cargo/bin/bountyscope` |
+| **Windows** (Windows 10 / 11) | `x86_64`, `aarch64` | `%USERPROFILE%\.cargo\bin\bountyscope.exe` |
+
+### Installation & Quick Verification by OS
+
+#### Linux & macOS (bash / zsh)
+
+```bash
+git clone https://github.com/Rohinthan/BountyScope.git
+cd BountyScope
+cargo install --path .
+
+export BOUNTYSCOPE_CONFIG=configs/scope.example.yaml
+bountyscope validate-scope
+```
+
+#### Windows (PowerShell)
+
+```powershell
+git clone https://github.com/Rohinthan/BountyScope.git
+cd BountyScope
+cargo install --path .
+
+$env:BOUNTYSCOPE_CONFIG = "configs\scope.example.yaml"
+bountyscope validate-scope
+```
+
+---
+
 ## Quick Start: Testing Against a Sample Webpage
 
 This walkthrough demonstrates how to test BountyScope against a local sample webpage from scratch in four steps.
