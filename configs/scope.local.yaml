@@ -1,0 +1,28 @@
+# BountyScope Local Lab Scope Configuration
+# Configured for offline testing against loopback services (127.0.0.1)
+
+program_name: "local-lab-verification"
+platform: "local"
+
+# Allowed domains and loopback interfaces
+allowed_domains:
+  - "127.0.0.1"
+  - "localhost"
+
+# Excluded subdomains / third parties
+excluded_domains: []
+
+# Excluded URL path patterns
+excluded_paths:
+  - "/api/v1/reset"
+
+# Rate limiting (requests per second)
+rate_limit_rps: 5
+
+# Safe mode enforces read-only passive inspections
+safe_mode: true
+
+# Rules of Engagement attribution and policy metadata
+researcher_handle: "local-analyst"
+policy_url: "http://127.0.0.1:8080/policy"
+excluded_checks: []
