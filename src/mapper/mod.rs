@@ -4,7 +4,7 @@ use crate::scope::{ScopeEnforcer, VerifiedScopeUrl};
 use crate::storage::{EndpointEntry, StorageEngine};
 use regex::Regex;
 use scraper::{Html, Selector};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 /// Represents an individual endpoint discovered during surface mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +179,7 @@ impl<'a> SurfaceMapper<'a> {
         let a_selector =
             Selector::parse("a[href]").map_err(|e| MapperError::Selector(format!("{e:?}")))?;
 
+        let mut seen_links = HashSet::new();
         for element in document.select(&a_selector) {
             if let Some(href) = element.value().attr("href") {
                 let href_trimmed = href.trim();
@@ -191,12 +192,18 @@ impl<'a> SurfaceMapper<'a> {
                     continue;
                 }
 
-                let candidate = match seed.as_url().join(href_trimmed) {
+                let mut candidate = match seed.as_url().join(href_trimmed) {
                     Ok(u) => u,
                     Err(_) => continue,
                 };
+                candidate.set_fragment(None);
 
                 if candidate.scheme() != "http" && candidate.scheme() != "https" {
+                    continue;
+                }
+
+                let candidate_str = candidate.as_str().to_string();
+                if !seen_links.insert(candidate_str) {
                     continue;
                 }
 
@@ -232,6 +239,7 @@ impl<'a> SurfaceMapper<'a> {
         let script_src_selector =
             Selector::parse("script[src]").map_err(|e| MapperError::Selector(format!("{e:?}")))?;
 
+        let mut seen_scripts = HashSet::new();
         let mut scripts_to_fetch = Vec::new();
         for element in document.select(&script_src_selector) {
             if let Some(src) = element.value().attr("src") {
@@ -240,12 +248,18 @@ impl<'a> SurfaceMapper<'a> {
                     continue;
                 }
 
-                let candidate = match seed.as_url().join(src_trimmed) {
+                let mut candidate = match seed.as_url().join(src_trimmed) {
                     Ok(u) => u,
                     Err(_) => continue,
                 };
+                candidate.set_fragment(None);
 
                 if candidate.scheme() != "http" && candidate.scheme() != "https" {
+                    continue;
+                }
+
+                let candidate_str = candidate.as_str().to_string();
+                if !seen_scripts.insert(candidate_str) {
                     continue;
                 }
 
@@ -337,13 +351,20 @@ impl<'a> SurfaceMapper<'a> {
         discovered_map: &mut BTreeMap<String, DiscoveredEndpoint>,
         out_of_scope_discarded: &mut usize,
     ) {
+        let mut seen_routes = HashSet::new();
         for cap in self.route_regex.captures_iter(js_code) {
             if let Some(matched_path) = cap.get(1) {
                 let path_str = matched_path.as_str();
-                let candidate = match seed.as_url().join(path_str) {
+                let mut candidate = match seed.as_url().join(path_str) {
                     Ok(u) => u,
                     Err(_) => continue,
                 };
+                candidate.set_fragment(None);
+
+                let candidate_str = candidate.as_str().to_string();
+                if !seen_routes.insert(candidate_str) {
+                    continue;
+                }
 
                 match self.enforcer.validate_url(candidate.as_str()) {
                     Ok(verified) => {
@@ -436,10 +457,11 @@ impl<'a> SurfaceMapper<'a> {
                             continue;
                         }
 
-                        let resolved = match seed.as_url().join(clean_path) {
+                        let mut resolved = match seed.as_url().join(clean_path) {
                             Ok(u) => u,
                             Err(_) => continue,
                         };
+                        resolved.set_fragment(None);
 
                         match self.enforcer.validate_url(resolved.as_str()) {
                             Ok(verified) => {
@@ -484,10 +506,11 @@ impl<'a> SurfaceMapper<'a> {
         let candidate_paths = ["/openapi.json", "/swagger.json", "/v3/api-docs"];
 
         for path in candidate_paths {
-            let candidate_url = match seed.as_url().join(path) {
+            let mut candidate_url = match seed.as_url().join(path) {
                 Ok(u) => u,
                 Err(_) => continue,
             };
+            candidate_url.set_fragment(None);
 
             let verified = match self.enforcer.validate_url(candidate_url.as_str()) {
                 Ok(v) => v,
@@ -593,6 +616,8 @@ mod tests {
 </head>
 <body>
     <a href="/dashboard">Dashboard</a>
+    <a href="/dashboard#overview">Dashboard Overview</a>
+    <a href="/dashboard#settings">Dashboard Settings</a>
     <a href="/logout">Logout</a>
     <a href="https://external.example.com/portal">External Portal</a>
     <script>

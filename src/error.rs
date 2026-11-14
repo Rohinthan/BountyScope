@@ -90,3 +90,35 @@ pub enum MapperError {
     #[error("Regex compilation error: {0}")]
     Regex(#[from] regex::Error),
 }
+
+/// Structured errors for verification runner operations.
+#[derive(Debug, Error)]
+pub enum VerifierError {
+    #[error("Scope error during verification: {0}")]
+    Scope(#[from] ScopeError),
+
+    #[error("HTTP error during verification: {0}")]
+    Http(#[from] HttpError),
+
+    #[error("Storage error during verification: {0}")]
+    Storage(#[from] StorageError),
+
+    #[error("URL parsing error during verification: {0}")]
+    Url(#[from] url::ParseError),
+
+    #[error("JSON serialization error during verification: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+/// Structured errors for report generation operations.
+#[derive(Debug, Error)]
+pub enum ReportError {
+    #[error("I/O error during report generation: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Storage error during report generation: {0}")]
+    Storage(#[from] StorageError),
+
+    #[error("Program not found: {0}")]
+    ProgramNotFound(String),
+}

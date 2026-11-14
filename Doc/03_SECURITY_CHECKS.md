@@ -55,3 +55,17 @@ To maintain high data quality and avoid noise, BountyScope applies deterministic
 3. **Static CDN and Asset Disqualification:** CORS reflections on static font assets (`.woff`, `.woff2`, `.ttf`), image files, and public stylesheet bundles are classified as informational or ignored, as open cross-origin sharing is standard operational behavior for non-sensitive static assets.
 4. **Header Deprecation Deduplication:** Where `Content-Security-Policy` with `frame-ancestors` is properly configured, absence of legacy `X-Frame-Options` is filtered or lowered to informational status in compliance with modern browser specifications.
 5. **Rate-Limit Backoff Verification:** Responses bearing status codes 429, 503, or cloud provider challenge pages (e.g., Cloudflare, Akamai, CloudFront) are isolated from vulnerability analysis to prevent treating rate-limiting challenge pages as application responses.
+
+---
+
+## Verification Execution & Reporting Workflow
+
+The safe verification process operates directly against mapped endpoints persisted in SQLite:
+
+1. **Policy Audit (`bountyscope audit`):**
+   - Loads persisted endpoints for the target program.
+   - Dispatches read-only, rate-limited probes for security header configurations, CORS policy responses, exposed specifications, and AI/MCP endpoint posture.
+   - Idempotently persists structured finding records into the `findings` table.
+
+2. **Report Generation (`bountyscope report`):**
+   - Formats program metadata, boundary configurations, severity counts, and detailed findings with JSON evidence and remediation instructions into a structured Markdown document.

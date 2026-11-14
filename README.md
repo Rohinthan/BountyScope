@@ -142,6 +142,36 @@ Surface mapping complete for http://127.0.0.1:8080/: 14 endpoints discovered (9 
   [openapi_spec] http://127.0.0.1:8080/openapi.json (HTTP 200)
 ```
 
+### Audit Mapped Endpoints
+
+Execute safe, non-destructive policy and configuration checks across mapped endpoints:
+
+```bash
+bountyscope audit --config configs/scope.example.yaml --db data/bountyscope.db
+```
+
+Sample output:
+```text
+Audit completed for program 'example-security-program': 9 endpoints audited, 6 total findings
+  CRITICAL: 0
+  HIGH:     1
+  MEDIUM:   1
+  LOW:      3
+  INFO:     1
+```
+
+### Generate Assessment Markdown Report
+
+Render assessment findings, severity breakdowns, and remediation guidance into Markdown:
+
+```bash
+# Export to a Markdown report file
+bountyscope report --config configs/scope.example.yaml --db data/bountyscope.db --output report.md
+
+# Print directly to standard output
+bountyscope report --config configs/scope.example.yaml --db data/bountyscope.db
+```
+
 ---
 
 ## Local Testing Lab

@@ -94,6 +94,17 @@ impl ScopedHttpClient {
     ///
     /// The compile-time lock guarantees that `target` has been authenticated by `ScopeEnforcer`.
     pub async fn get(&self, target: &VerifiedScopeUrl) -> Result<HttpProbeResponse, HttpError> {
+        self.get_with_headers(target, &[]).await
+    }
+
+    /// Dispatches a safe, rate-limited GET request to a verified target URL with custom headers.
+    ///
+    /// Useful for passive auditing checks such as CORS origin reflection probes.
+    pub async fn get_with_headers(
+        &self,
+        target: &VerifiedScopeUrl,
+        headers: &[(&str, &str)],
+    ) -> Result<HttpProbeResponse, HttpError> {
         let mut limiter = self.rate_limiter.lock().await;
         let mut was_rate_limited = false;
 
@@ -109,8 +120,13 @@ impl ScopedHttpClient {
         limiter.last_request_instant = Some(Instant::now());
         drop(limiter);
 
+        let mut req_builder = self.client.get(target.as_str());
+        for (name, val) in headers {
+            req_builder = req_builder.header(*name, *val);
+        }
+
         let start_time = std::time::Instant::now();
-        let request_result = self.client.get(target.as_str()).send().await;
+        let request_result = req_builder.send().await;
         let duration_ms = start_time.elapsed().as_millis() as u64;
 
         match request_result {
