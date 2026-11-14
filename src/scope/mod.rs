@@ -31,6 +31,29 @@ pub struct ScopeConfig {
     pub rate_limit_rps: u32,
     #[serde(default = "default_safe_mode")]
     pub safe_mode: bool,
+    #[serde(default)]
+    pub researcher_handle: Option<String>,
+    #[serde(default)]
+    pub policy_url: Option<String>,
+    #[serde(default)]
+    pub excluded_checks: Vec<String>,
+}
+
+impl Default for ScopeConfig {
+    fn default() -> Self {
+        Self {
+            program_name: String::new(),
+            platform: String::new(),
+            allowed_domains: Vec::new(),
+            excluded_domains: Vec::new(),
+            excluded_paths: Vec::new(),
+            rate_limit_rps: default_rate_limit(),
+            safe_mode: default_safe_mode(),
+            researcher_handle: None,
+            policy_url: None,
+            excluded_checks: Vec::new(),
+        }
+    }
 }
 
 impl ScopeConfig {
@@ -330,6 +353,9 @@ mod tests {
             ],
             rate_limit_rps: 2,
             safe_mode: true,
+            researcher_handle: None,
+            policy_url: None,
+            excluded_checks: vec![],
         }
     }
 

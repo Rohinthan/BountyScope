@@ -90,6 +90,9 @@ async fn test_offline_surface_mapper_end_to_end() {
         excluded_paths: vec!["/logout".to_string()],
         rate_limit_rps: 50,
         safe_mode: true,
+        researcher_handle: None,
+        policy_url: None,
+        excluded_checks: vec![],
     };
 
     let program_id = storage

@@ -590,6 +590,9 @@ mod tests {
             excluded_paths: vec!["/logout".to_string(), "/api/private/secret".to_string()],
             rate_limit_rps: 50,
             safe_mode: true,
+            researcher_handle: None,
+            policy_url: None,
+            excluded_checks: vec![],
         }
     }
 

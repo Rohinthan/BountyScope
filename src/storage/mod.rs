@@ -66,6 +66,7 @@ pub struct ProgramRecord {
     pub id: String,
     pub name: String,
     pub platform: String,
+    pub policy_url: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -138,6 +139,7 @@ impl StorageEngine {
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL UNIQUE,
             platform TEXT NOT NULL,
+            policy_url TEXT,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
@@ -195,6 +197,8 @@ impl StorageEngine {
         "#;
 
         conn.execute_batch(schema)?;
+        // Ensure policy_url column exists in programs table if created in earlier schema
+        let _ = conn.execute("ALTER TABLE programs ADD COLUMN policy_url TEXT;", []);
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -220,8 +224,8 @@ impl StorageEngine {
         let program_id = match existing_id {
             Some(id) => {
                 tx.execute(
-                    "UPDATE programs SET platform = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
-                    params![&config.platform, &id],
+                    "UPDATE programs SET platform = ?1, policy_url = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?3",
+                    params![&config.platform, &config.policy_url, &id],
                 )?;
                 tx.execute(
                     "DELETE FROM scope_rules WHERE program_id = ?1",
@@ -232,8 +236,13 @@ impl StorageEngine {
             None => {
                 let id = Uuid::new_v4().to_string();
                 tx.execute(
-                    "INSERT INTO programs (id, name, platform) VALUES (?1, ?2, ?3)",
-                    params![&id, &config.program_name, &config.platform],
+                    "INSERT INTO programs (id, name, platform, policy_url) VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        &id,
+                        &config.program_name,
+                        &config.platform,
+                        &config.policy_url
+                    ],
                 )?;
                 id
             }
@@ -416,15 +425,16 @@ impl StorageEngine {
     pub fn get_program_by_id(&self, program_id: &str) -> Result<ProgramRecord, StorageError> {
         let conn = self.conn.lock().map_err(|_| StorageError::LockFailure)?;
         conn.query_row(
-            "SELECT id, name, platform, created_at, updated_at FROM programs WHERE id = ?1",
+            "SELECT id, name, platform, policy_url, created_at, updated_at FROM programs WHERE id = ?1",
             params![program_id],
             |row| {
                 Ok(ProgramRecord {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     platform: row.get(2)?,
-                    created_at: row.get(3)?,
-                    updated_at: row.get(4)?,
+                    policy_url: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
                 })
             },
         )
@@ -440,15 +450,16 @@ impl StorageEngine {
     pub fn get_program_by_name(&self, program_name: &str) -> Result<ProgramRecord, StorageError> {
         let conn = self.conn.lock().map_err(|_| StorageError::LockFailure)?;
         conn.query_row(
-            "SELECT id, name, platform, created_at, updated_at FROM programs WHERE name = ?1",
+            "SELECT id, name, platform, policy_url, created_at, updated_at FROM programs WHERE name = ?1",
             params![program_name],
             |row| {
                 Ok(ProgramRecord {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     platform: row.get(2)?,
-                    created_at: row.get(3)?,
-                    updated_at: row.get(4)?,
+                    policy_url: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
                 })
             },
         )
@@ -593,6 +604,9 @@ mod tests {
             excluded_paths: vec!["/logout".to_string()],
             rate_limit_rps: 2,
             safe_mode: true,
+            researcher_handle: None,
+            policy_url: Some("https://hackerone.com/test-storage-program".to_string()),
+            excluded_checks: vec![],
         }
     }
 
@@ -636,6 +650,22 @@ mod tests {
             .expect("count failed");
         // 3 allowed domains + 1 excluded domain + 1 excluded path = 5 rules
         assert_eq!(rule_count, 5);
+        drop(conn);
+
+        let prog = storage
+            .get_program_by_id(&program_id)
+            .expect("get_program_by_id failed");
+        assert_eq!(
+            prog.policy_url.as_deref(),
+            Some("https://hackerone.com/test-storage-program")
+        );
+        let prog_by_name = storage
+            .get_program_by_name(&config.program_name)
+            .expect("get_program_by_name failed");
+        assert_eq!(
+            prog_by_name.policy_url.as_deref(),
+            Some("https://hackerone.com/test-storage-program")
+        );
     }
 
     #[test]

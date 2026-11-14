@@ -56,6 +56,33 @@ impl<'a> SafeVerificationRunner<'a> {
         extensions.iter().any(|ext| p.ends_with(ext))
     }
 
+    /// Evaluates if a given finding type is excluded by program Rules of Engagement.
+    pub fn is_check_excluded(&self, finding_type: &str) -> bool {
+        self.enforcer
+            .config()
+            .excluded_checks
+            .iter()
+            .any(|excluded| {
+                excluded.eq_ignore_ascii_case(finding_type)
+                    || (finding_type == "header_info_disclosure"
+                        && excluded.eq_ignore_ascii_case("information_disclosure"))
+                    || (finding_type == "information_disclosure"
+                        && excluded.eq_ignore_ascii_case("header_info_disclosure"))
+                    || (finding_type == "weak_csp"
+                        && excluded.eq_ignore_ascii_case("weak_security_headers"))
+                    || (finding_type == "weak_security_headers"
+                        && excluded.eq_ignore_ascii_case("weak_csp"))
+            })
+    }
+
+    /// Persists a finding to storage if its finding type is not excluded by program policy.
+    pub fn record_finding(&self, finding: FindingEntry) -> Result<(), VerifierError> {
+        if !self.is_check_excluded(&finding.finding_type) {
+            self.storage.upsert_finding(&finding)?;
+        }
+        Ok(())
+    }
+
     /// Executes safe verification checks across all persisted endpoints for the configured program.
     pub async fn run(&self) -> Result<VerificationSummary, VerifierError> {
         let endpoints = self.storage.get_endpoints_for_program(&self.program_id)?;
@@ -90,7 +117,7 @@ impl<'a> SafeVerificationRunner<'a> {
                         "Restrict public exposure of internal API specifications in production. Enforce authentication or restrict access to internal networks.".to_string(),
                     ),
                 };
-                self.storage.upsert_finding(&finding)?;
+                self.record_finding(finding)?;
             }
 
             // Check 2: Baseline probe for security headers and technology disclosure
@@ -104,7 +131,7 @@ impl<'a> SafeVerificationRunner<'a> {
                     let finding = FindingEntry {
                         program_id: self.program_id.clone(),
                         endpoint_id: Some(endpoint.id.clone()),
-                        finding_type: "information_disclosure".to_string(),
+                        finding_type: "header_info_disclosure".to_string(),
                         severity: "INFO".to_string(),
                         title: "Technology Disclosure Header (X-Powered-By)".to_string(),
                         description: format!(
@@ -121,7 +148,7 @@ impl<'a> SafeVerificationRunner<'a> {
                             "Disable or remove the 'X-Powered-By' header in production server configuration.".to_string(),
                         ),
                     };
-                    self.storage.upsert_finding(&finding)?;
+                    self.record_finding(finding)?;
                 }
 
                 // Technology disclosure: Server banner with version
@@ -134,7 +161,7 @@ impl<'a> SafeVerificationRunner<'a> {
                         let finding = FindingEntry {
                             program_id: self.program_id.clone(),
                             endpoint_id: Some(endpoint.id.clone()),
-                            finding_type: "information_disclosure".to_string(),
+                            finding_type: "header_info_disclosure".to_string(),
                             severity: "INFO".to_string(),
                             title: "Verbose Server Version Banner Disclosure".to_string(),
                             description: format!(
@@ -151,7 +178,7 @@ impl<'a> SafeVerificationRunner<'a> {
                                 "Configure web servers to omit granular software versions (e.g., 'ServerTokens Prod' in Apache or 'server_tokens off' in nginx).".to_string(),
                             ),
                         };
-                        self.storage.upsert_finding(&finding)?;
+                        self.record_finding(finding)?;
                     }
                 }
 
@@ -175,7 +202,7 @@ impl<'a> SafeVerificationRunner<'a> {
                             let finding = FindingEntry {
                                 program_id: self.program_id.clone(),
                                 endpoint_id: Some(endpoint.id.clone()),
-                                finding_type: "weak_security_headers".to_string(),
+                                finding_type: "weak_csp".to_string(),
                                 severity: "LOW".to_string(),
                                 title: "Permissive Content-Security-Policy Directives".to_string(),
                                 description: "The Content-Security-Policy permits 'unsafe-inline' or 'unsafe-eval', weakening script injection defenses.".to_string(),
@@ -188,7 +215,7 @@ impl<'a> SafeVerificationRunner<'a> {
                                     "Refactor inline scripts and dynamic evaluations to eliminate 'unsafe-inline' and 'unsafe-eval'. Use nonces or hashes.".to_string(),
                                 ),
                             };
-                            self.storage.upsert_finding(&finding)?;
+                            self.record_finding(finding)?;
                         }
                     }
                     None => {
@@ -208,7 +235,7 @@ impl<'a> SafeVerificationRunner<'a> {
                                 "Implement a restrictive Content-Security-Policy header defining authorized script-src and default-src directives.".to_string(),
                             ),
                         };
-                        self.storage.upsert_finding(&finding)?;
+                        self.record_finding(finding)?;
                     }
                 }
 
@@ -236,7 +263,7 @@ impl<'a> SafeVerificationRunner<'a> {
                                 "Enable Strict-Transport-Security with 'max-age=31536000; includeSubDomains'.".to_string(),
                             ),
                         };
-                        self.storage.upsert_finding(&finding)?;
+                        self.record_finding(finding)?;
                     }
                 }
 
@@ -263,7 +290,7 @@ impl<'a> SafeVerificationRunner<'a> {
                             "Configure web servers to send 'X-Content-Type-Options: nosniff' across all responses.".to_string(),
                         ),
                     };
-                    self.storage.upsert_finding(&finding)?;
+                    self.record_finding(finding)?;
                 }
 
                 // Security headers: Clickjacking protection (X-Frame-Options or CSP frame-ancestors)
@@ -292,7 +319,7 @@ impl<'a> SafeVerificationRunner<'a> {
                                 "Configure Content-Security-Policy with 'frame-ancestors 'none'' or set 'X-Frame-Options: DENY'.".to_string(),
                             ),
                         };
-                        self.storage.upsert_finding(&finding)?;
+                        self.record_finding(finding)?;
                     }
                 }
 
@@ -328,7 +355,7 @@ impl<'a> SafeVerificationRunner<'a> {
                                 "Enforce token authentication (such as Bearer tokens or mTLS) on AI gateway and Model Context Protocol interfaces.".to_string(),
                             ),
                         };
-                        self.storage.upsert_finding(&finding)?;
+                        self.record_finding(finding)?;
                     }
                 }
             }
@@ -397,7 +424,7 @@ impl<'a> SafeVerificationRunner<'a> {
                                         "Do not dynamically reflect untrusted Origin headers. Maintain an explicit whitelist of trusted origins, and avoid permitting the 'null' origin or credentials on untrusted domains.".to_string(),
                                     ),
                                 };
-                                self.storage.upsert_finding(&finding)?;
+                                self.record_finding(finding)?;
                             }
                         }
                     }
@@ -405,8 +432,13 @@ impl<'a> SafeVerificationRunner<'a> {
             }
         }
 
-        // Calculate summary metrics from persisted findings
-        let findings = self.storage.get_findings_for_program(&self.program_id)?;
+        // Calculate summary metrics from persisted findings (respecting excluded_checks)
+        let findings: Vec<_> = self
+            .storage
+            .get_findings_for_program(&self.program_id)?
+            .into_iter()
+            .filter(|f| !self.is_check_excluded(&f.finding_type))
+            .collect();
         let mut critical_count = 0;
         let mut high_count = 0;
         let mut medium_count = 0;
@@ -453,6 +485,9 @@ mod tests {
             excluded_paths: vec![],
             rate_limit_rps: 50,
             safe_mode: true,
+            researcher_handle: None,
+            policy_url: None,
+            excluded_checks: vec![],
         }
     }
 
@@ -556,10 +591,89 @@ mod tests {
                 && f.finding_type == "cors_misconfiguration"));
         // Verify technology disclosure was detected
         assert!(findings.iter().any(
-            |f| f.finding_type == "information_disclosure" && f.title.contains("X-Powered-By")
+            |f| f.finding_type == "header_info_disclosure" && f.title.contains("X-Powered-By")
         ));
         assert!(findings
             .iter()
-            .any(|f| f.finding_type == "information_disclosure" && f.title.contains("Server")));
+            .any(|f| f.finding_type == "header_info_disclosure" && f.title.contains("Server")));
+    }
+
+    #[tokio::test]
+    async fn test_excluded_checks_suppression() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind failed");
+        let addr = listener.local_addr().expect("local_addr failed");
+        let port = addr.port();
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+
+                    let req_lower = req.to_ascii_lowercase();
+                    let response = if req_lower
+                        .contains("origin: https://untrusted.example.invalid")
+                    {
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: https://untrusted.example.invalid\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}".to_string()
+                    } else {
+                        "HTTP/1.1 200 OK\r\nX-Powered-By: Express\r\nServer: Apache/2.4.41\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}".to_string()
+                    };
+
+                    let _ = socket.write_all(response.as_bytes()).await;
+                }
+            }
+        });
+
+        let storage = StorageEngine::open_in_memory().expect("storage open failed");
+        let mut config = test_scope_config(port);
+        config.excluded_checks = vec![
+            "missing_security_headers".to_string(),
+            "header_info_disclosure".to_string(),
+        ];
+
+        let program_id = storage
+            .upsert_program_scope(&config)
+            .expect("upsert failed");
+        let enforcer = ScopeEnforcer::new(config).expect("enforcer failed");
+        let client =
+            ScopedHttpClient::new(storage.clone(), program_id.clone(), 50).expect("client failed");
+
+        let ep = EndpointEntry {
+            program_id: program_id.clone(),
+            url: format!("http://127.0.0.1:{}/api/test", port),
+            host: "127.0.0.1".to_string(),
+            path: "/api/test".to_string(),
+            method: "GET".to_string(),
+            discovered_via: "seed".to_string(),
+            status_code: Some(200),
+            response_size: Some(2),
+            content_type: Some("application/json".to_string()),
+        };
+        storage
+            .upsert_endpoint(&ep)
+            .expect("upsert endpoint failed");
+
+        let runner = SafeVerificationRunner::new(&enforcer, &client, &storage, program_id.clone());
+        let summary = runner.run().await.expect("runner failed");
+
+        let findings = storage
+            .get_findings_for_program(&program_id)
+            .expect("query findings failed");
+
+        // missing_security_headers and header_info_disclosure must NOT be present
+        assert!(!findings
+            .iter()
+            .any(|f| f.finding_type == "missing_security_headers"));
+        assert!(!findings
+            .iter()
+            .any(|f| f.finding_type == "header_info_disclosure"
+                || f.finding_type == "information_disclosure"));
+
+        // cors_misconfiguration must still be present
+        assert!(findings
+            .iter()
+            .any(|f| f.finding_type == "cors_misconfiguration"));
+        assert_eq!(summary.findings_count, findings.len());
     }
 }

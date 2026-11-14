@@ -31,18 +31,31 @@ BountyScope executes non-destructive security checks against in-scope targets to
 ### 4. HTTP Security Header Auditing
 - **Mechanism:** Inspects HTTP response headers on baseline and discovered endpoints to assess compliance with defense-in-depth transport and browser isolation policies.
 - **Evaluated Headers:**
-  - `Content-Security-Policy` (CSP): Validates presence, evaluates directives for unsafe-inline/unsafe-eval, and checks for missing default-src.
-  - `Strict-Transport-Security` (HSTS): Checks max-age values (minimum 1 year / 31536000 seconds recommended) and `includeSubDomains` flags.
-  - `X-Content-Type-Options`: Verifies explicit enforcement of `nosniff`.
-  - `X-Frame-Options`: Audits for `DENY` or `SAMEORIGIN` to mitigate clickjacking risks where CSP `frame-ancestors` is absent.
+  - `Content-Security-Policy` (CSP): Validates presence (`missing_security_headers`), evaluates directives for unsafe-inline/unsafe-eval (`weak_csp`), and checks for missing default-src.
+  - `Strict-Transport-Security` (HSTS): Checks max-age values (minimum 1 year / 31536000 seconds recommended) and `includeSubDomains` flags (`missing_security_headers`).
+  - `X-Content-Type-Options`: Verifies explicit enforcement of `nosniff` (`missing_security_headers`).
+  - `X-Frame-Options`: Audits for `DENY` or `SAMEORIGIN` to mitigate clickjacking risks where CSP `frame-ancestors` is absent (`missing_security_headers`).
+  - `Server` and `X-Powered-By`: Identifies software banners disclosing versions and framework fingerprints (`header_info_disclosure`).
   - `Cross-Origin-Opener-Policy` (COOP) & `Cross-Origin-Embedder-Policy` (COEP): Audits cross-origin process isolation settings.
 
 ### 5. Authorized AI Tool-Boundary and MCP Checks
 - **Mechanism:** Assesses exposed AI agent interaction endpoints, Model Context Protocol (MCP) server endpoints, and LLM gateway APIs:
-  - Audits authentication barriers on exposed MCP endpoints (`/sse`, `/messages`, `/tools/list`).
-  - Verifies whether tool execution interfaces require scoped access tokens.
+  - Audits authentication barriers on exposed MCP endpoints (`/sse`, `/messages`, `/tools/list`, `/mcp`, `/v1/models`).
+  - Registers `unauthenticated_ai_endpoint` findings when AI gateway endpoints respond with HTTP 200 without requiring authentication or presenting an authorization challenge.
   - Tests boundary enforcement on prompt endpoints to detect exposed system instructions or unauthenticated administrative tool invocation.
 - **Safety Boundary:** Probes evaluate transport security, HTTP authentication headers, and read-only schema introspection (`tools/list`). Never sends destructive tool invocations or autonomous execution loops.
+
+---
+
+## Standard Finding Types
+
+BountyScope standardizes finding categories across audits:
+- `missing_security_headers`: Omission of fundamental defense-in-depth HTTP response headers (CSP, HSTS, XCTO, XFO).
+- `weak_csp`: Content-Security-Policy containing `'unsafe-inline'` or `'unsafe-eval'`.
+- `cors_misconfiguration`: Arbitrary origin reflection or `null` origin reflection with credentials allowed.
+- `exposed_api_spec`: Publicly accessible OpenAPI, Swagger, or Postman specification documents.
+- `header_info_disclosure`: Backend framework disclosure (`X-Powered-By`) or verbose version disclosure (`Server`).
+- `unauthenticated_ai_endpoint`: Exposed AI model gateway or Model Context Protocol endpoint lacking authentication.
 
 ---
 
@@ -55,6 +68,7 @@ To maintain high data quality and avoid noise, BountyScope applies deterministic
 3. **Static CDN and Asset Disqualification:** CORS reflections on static font assets (`.woff`, `.woff2`, `.ttf`), image files, and public stylesheet bundles are classified as informational or ignored, as open cross-origin sharing is standard operational behavior for non-sensitive static assets.
 4. **Header Deprecation Deduplication:** Where `Content-Security-Policy` with `frame-ancestors` is properly configured, absence of legacy `X-Frame-Options` is filtered or lowered to informational status in compliance with modern browser specifications.
 5. **Rate-Limit Backoff Verification:** Responses bearing status codes 429, 503, or cloud provider challenge pages (e.g., Cloudflare, Akamai, CloudFront) are isolated from vulnerability analysis to prevent treating rate-limiting challenge pages as application responses.
+6. **Program Policy Exclusions (`excluded_checks`):** Checks matching configured exclusion rules in `scope.yaml` (such as `missing_security_headers`, `header_info_disclosure`, or `weak_csp`) are suppressed prior to persistence and excluded from assessment metrics.
 
 ---
 

@@ -10,8 +10,8 @@ BountyScope is an automated vulnerability surface mapping and passive policy ver
 ## Key Capabilities
 
 - **Compile-Time Scope Enforcement:** Prevents unintended network calls by enforcing the `VerifiedScopeUrl` type invariant on internal HTTP clients.
-- **Strict Scope Configuration:** Validates domains, wildcard subdomains, negative path exclusions, and concurrency limits via YAML schema.
-- **Scope-Locked HTTP Client:** Outbound dispatcher strictly rejecting automatic redirects, enforcing rate limits, and recording full audit trails.
+- **Strict Scope Configuration & RoE Attribution:** Validates domains, wildcard subdomains, negative path exclusions, researcher handles (`X-Bug-Bounty` attribution), governing policy URLs, and program check exclusions (`excluded_checks`).
+- **Scope-Locked HTTP Client:** Outbound dispatcher strictly rejecting automatic redirects, enforcing rate limits, attaching attribution headers, and recording full audit trails.
 - **Embedded SQLite Storage:** Local persistence for scope definitions, mapped endpoints, and outbound interaction audit logs with WAL mode and foreign key enforcement.
 - **Surface Mapping:** Discovers endpoints from HTML structures, scripts, and standard metadata specifications without intrusive probing.
 - **Passive Policy Auditing:** Evaluates HTTP security headers, Cross-Origin Resource Sharing (CORS) configurations, and exposed OpenAPI/Swagger documentation.

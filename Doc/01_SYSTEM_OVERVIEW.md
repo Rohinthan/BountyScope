@@ -29,6 +29,9 @@ BountyScope provides mathematical and architectural guarantees to isolate target
 The operational model strictly adheres to legal and ethical vulnerability disclosure standards:
 
 - **Authorized Execution Only:** BountyScope must only be executed against systems where explicit written authorization or formal bug bounty program coverage has been established.
+- **Rules of Engagement Attribution (`researcher_handle`):** When specified in configuration, outbound HTTP traffic automatically carries the `X-Bug-Bounty: <handle>` identification header, providing direct attribution to authorized security researchers.
+- **Governing Policy References (`policy_url`):** Configurations link directly to governing program policies and Safe Harbor clauses, recorded alongside assessment artifacts for compliance auditing.
+- **Policy Finding Exclusions (`excluded_checks`):** Target programs may declare certain low-severity configurations non-qualifying (such as missing security headers or verbose banner exposures). BountyScope filters these checks to prevent noise and respect program-specific rules.
 - **Prohibition of Denial of Service (DoS):** Volumetric request flooding, thread exhaustion, large-body memory saturation payloads, and resource exhaustion vectors are eliminated from execution suites.
 - **Data Privacy and Integrity:** Automated verification inspects public-facing headers, public script files, published API specifications, and permission boundaries. The tool does not store, exfiltrate, or alter sensitive customer or personal data.
 - **Auditability and Transparency:** All generated requests include standard identification headers when configured, allowing target system operators to correlate automated requests with authorized assessment activity.

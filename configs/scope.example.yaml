@@ -28,3 +28,11 @@ rate_limit_rps: 2
 
 # Safe mode enforces read-only passive inspections and non-destructive payloads
 safe_mode: true
+
+# Optional Rules of Engagement (RoE) attribution and Safe Harbor terms
+researcher_handle: "security-researcher"
+policy_url: "https://hackerone.com/example-security-program/policy"
+
+# Optional list of finding types excluded by program policy
+excluded_checks:
+  - "missing_security_headers"

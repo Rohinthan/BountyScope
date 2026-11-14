@@ -25,6 +25,12 @@ impl ReportGenerator {
         doc.push_str("## Executive Summary\n\n");
         doc.push_str(&format!("- **Program Name:** {}\n", program.name));
         doc.push_str(&format!("- **Platform / Source:** {}\n", program.platform));
+        if let Some(policy_url) = &program.policy_url {
+            doc.push_str(&format!("- **Policy / Safe Harbor:** {}\n", policy_url));
+        }
+        if let Some(handle) = &config.researcher_handle {
+            doc.push_str(&format!("- **Researcher Attribution:** `{}`\n", handle));
+        }
         doc.push_str(&format!(
             "- **Total Endpoints Audited:** {}\n",
             endpoints.len()
@@ -45,6 +51,15 @@ impl ReportGenerator {
             "- **Rate Limit Ceiling:** {} req/sec\n",
             config.rate_limit_rps
         ));
+        if let Some(handle) = &config.researcher_handle {
+            doc.push_str(&format!(
+                "- **Researcher Attribution Header (`X-Bug-Bounty`):** `{}`\n",
+                handle
+            ));
+        }
+        if let Some(policy_url) = &config.policy_url {
+            doc.push_str(&format!("- **Governing Policy URL:** {}\n", policy_url));
+        }
 
         doc.push_str("\n### Allowed Target Domains\n");
         if config.allowed_domains.is_empty() {
@@ -70,6 +85,15 @@ impl ReportGenerator {
         } else {
             for path in &config.excluded_paths {
                 doc.push_str(&format!("- `{path}`\n"));
+            }
+        }
+
+        doc.push_str("\n### Excluded Checks (Rules of Engagement)\n");
+        if config.excluded_checks.is_empty() {
+            doc.push_str("_None defined_\n");
+        } else {
+            for check in &config.excluded_checks {
+                doc.push_str(&format!("- `{check}`\n"));
             }
         }
 
@@ -200,6 +224,7 @@ mod tests {
             id: "prog-1".to_string(),
             name: "report-test-app".to_string(),
             platform: "local".to_string(),
+            policy_url: Some("https://hackerone.com/example-program/policy".to_string()),
             created_at: "2026-11-14 10:00:00".to_string(),
             updated_at: "2026-11-14 10:05:00".to_string(),
         };
@@ -212,6 +237,9 @@ mod tests {
             excluded_paths: vec!["/logout".to_string()],
             rate_limit_rps: 10,
             safe_mode: true,
+            researcher_handle: Some("security-researcher".to_string()),
+            policy_url: Some("https://hackerone.com/example-program/policy".to_string()),
+            excluded_checks: vec!["missing_security_headers".to_string()],
         };
 
         let endpoints = vec![EndpointRecord {
@@ -249,5 +277,8 @@ mod tests {
         assert!(md.contains("[HIGH] CORS with credentials"));
         assert!(md.contains("`http://127.0.0.1:8080/api/v1/auth`"));
         assert!(md.contains("Do not reflect arbitrary origin"));
+        assert!(md.contains("https://hackerone.com/example-program/policy"));
+        assert!(md.contains("security-researcher"));
+        assert!(md.contains("missing_security_headers"));
     }
 }

@@ -53,6 +53,7 @@ pub struct ScopedHttpClient {
     program_id: String,
     rate_limiter: Arc<Mutex<RateLimiterState>>,
     min_interval: Duration,
+    researcher_handle: Option<String>,
 }
 
 impl ScopedHttpClient {
@@ -87,7 +88,14 @@ impl ScopedHttpClient {
                 last_request_instant: None,
             })),
             min_interval,
+            researcher_handle: None,
         })
+    }
+
+    /// Attaches an optional researcher handle for attribution via `X-Bug-Bounty` on outbound requests.
+    pub fn with_researcher_handle(mut self, handle: Option<String>) -> Self {
+        self.researcher_handle = handle;
+        self
     }
 
     /// Dispatches a safe, rate-limited GET request to a verified target URL.
@@ -121,6 +129,9 @@ impl ScopedHttpClient {
         drop(limiter);
 
         let mut req_builder = self.client.get(target.as_str());
+        if let Some(handle) = &self.researcher_handle {
+            req_builder = req_builder.header("X-Bug-Bounty", handle);
+        }
         for (name, val) in headers {
             req_builder = req_builder.header(*name, *val);
         }
@@ -243,6 +254,9 @@ mod tests {
             excluded_paths: vec![],
             rate_limit_rps: 10,
             safe_mode: true,
+            researcher_handle: None,
+            policy_url: None,
+            excluded_checks: vec![],
         }
     }
 
@@ -376,5 +390,47 @@ mod tests {
         let logs = storage.get_audit_logs(&program_id).expect("logs failed");
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].status_code, Some(200));
+    }
+
+    #[tokio::test]
+    async fn test_researcher_handle_attribution_header() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind failed");
+        let addr = listener.local_addr().expect("local_addr failed");
+        let port = addr.port();
+
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                let has_handle = req.contains("x-bug-bounty: bug-hunter-123");
+                let status = if has_handle {
+                    "200 OK"
+                } else {
+                    "400 Bad Request"
+                };
+                let response = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n");
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let storage = StorageEngine::open_in_memory().expect("storage open failed");
+        let config = test_scope_config(port);
+        let program_id = storage
+            .upsert_program_scope(&config)
+            .expect("upsert failed");
+        let enforcer = ScopeEnforcer::new(config).expect("enforcer failed");
+
+        let client = ScopedHttpClient::new(storage.clone(), program_id.clone(), 10)
+            .expect("client failed")
+            .with_researcher_handle(Some("bug-hunter-123".to_string()));
+
+        let target_url = format!("http://127.0.0.1:{}/attribution", port);
+        let verified = enforcer
+            .validate_url(&target_url)
+            .expect("validation failed");
+
+        let response = client.get(&verified).await.expect("request failed");
+        assert_eq!(response.status_code, 200);
     }
 }

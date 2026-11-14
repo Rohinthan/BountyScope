@@ -52,6 +52,9 @@ async fn test_offline_verification_runner_and_report_generation() {
         excluded_paths: vec!["/logout".to_string()],
         rate_limit_rps: 50,
         safe_mode: true,
+        researcher_handle: Some("security-tester".to_string()),
+        policy_url: Some("https://example.com/policy".to_string()),
+        excluded_checks: vec![],
     };
 
     let program_id = storage
@@ -151,10 +154,14 @@ async fn test_offline_verification_runner_and_report_generation() {
     // Information disclosure check
     assert!(findings
         .iter()
-        .any(|f| f.finding_type == "information_disclosure" && f.title.contains("X-Powered-By")));
+        .any(|f| (f.finding_type == "header_info_disclosure"
+            || f.finding_type == "information_disclosure")
+            && f.title.contains("X-Powered-By")));
     assert!(findings
         .iter()
-        .any(|f| f.finding_type == "information_disclosure" && f.title.contains("Server")));
+        .any(|f| (f.finding_type == "header_info_disclosure"
+            || f.finding_type == "information_disclosure")
+            && f.title.contains("Server")));
 
     // Missing security headers check
     assert!(findings

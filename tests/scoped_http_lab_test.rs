@@ -33,6 +33,9 @@ async fn test_offline_loopback_probe_and_audit_logging() {
         excluded_paths: vec!["/admin".to_string()],
         rate_limit_rps: 5,
         safe_mode: true,
+        researcher_handle: None,
+        policy_url: None,
+        excluded_checks: vec![],
     };
 
     let program_id = storage
@@ -94,6 +97,9 @@ async fn test_redirect_safety_without_automatic_following() {
         excluded_paths: vec![],
         rate_limit_rps: 5,
         safe_mode: true,
+        researcher_handle: None,
+        policy_url: None,
+        excluded_checks: vec![],
     };
 
     let program_id = storage
@@ -147,6 +153,9 @@ async fn test_rate_limiter_inter_request_spacing() {
         excluded_paths: vec![],
         rate_limit_rps: 1, // 1000ms spacing
         safe_mode: true,
+        researcher_handle: None,
+        policy_url: None,
+        excluded_checks: vec![],
     };
 
     let program_id = storage

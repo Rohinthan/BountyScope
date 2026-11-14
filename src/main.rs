@@ -152,7 +152,8 @@ async fn execute_probe(config_path: &PathBuf, url_str: &str, db_path: &PathBuf) 
         .with_context(|| "Failed to upsert target scope in database")?;
 
     let client = ScopedHttpClient::new(storage, program_id, config.rate_limit_rps)
-        .with_context(|| "Failed to initialize scoped HTTP client")?;
+        .with_context(|| "Failed to initialize scoped HTTP client")?
+        .with_researcher_handle(config.researcher_handle.clone());
 
     let response = client
         .get(&verified_url)
@@ -197,7 +198,8 @@ async fn execute_map(config_path: &PathBuf, url_str: &str, db_path: &PathBuf) ->
         .with_context(|| "Failed to upsert target scope in database")?;
 
     let client = ScopedHttpClient::new(storage.clone(), program_id.clone(), config.rate_limit_rps)
-        .with_context(|| "Failed to initialize scoped HTTP client")?;
+        .with_context(|| "Failed to initialize scoped HTTP client")?
+        .with_researcher_handle(config.researcher_handle.clone());
 
     let mapper = SurfaceMapper::new(&enforcer, &client, &storage, program_id)
         .with_context(|| "Failed to initialize surface mapper")?;
@@ -251,7 +253,8 @@ async fn execute_audit(config_path: &PathBuf, db_path: &PathBuf) -> Result<()> {
         })?;
 
     let client = ScopedHttpClient::new(storage.clone(), program.id.clone(), config.rate_limit_rps)
-        .with_context(|| "Failed to initialize scoped HTTP client")?;
+        .with_context(|| "Failed to initialize scoped HTTP client")?
+        .with_researcher_handle(config.researcher_handle.clone());
 
     let runner = SafeVerificationRunner::new(&enforcer, &client, &storage, program.id.clone());
     let summary = runner

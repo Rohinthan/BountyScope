@@ -14,6 +14,15 @@ fn test_scope_example_yaml_loads_and_enforces_boundaries() {
     assert_eq!(config.platform, "hackerone");
     assert_eq!(config.rate_limit_rps, 2);
     assert!(config.safe_mode);
+    assert_eq!(
+        config.researcher_handle.as_deref(),
+        Some("security-researcher")
+    );
+    assert_eq!(
+        config.policy_url.as_deref(),
+        Some("https://hackerone.com/example-security-program/policy")
+    );
+    assert_eq!(config.excluded_checks, vec!["missing_security_headers"]);
 
     let enforcer = ScopeEnforcer::new(config)
         .unwrap_or_else(|err| panic!("ScopeEnforcer failed initialization: {err}"));
