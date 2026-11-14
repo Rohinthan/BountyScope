@@ -1,0 +1,8 @@
+{
+   rust_libtest_tls_mpmc
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:malloc
+   ...
+   fun:*sync*mpmc*context*Context*new*
+}

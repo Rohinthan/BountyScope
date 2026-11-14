@@ -1,0 +1,30 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "BountyScope Lab Mock API",
+    "version": "1.0.0",
+    "description": "Offline mock API target for local security verification"
+  },
+  "paths": {
+    "/api/v1/health": {
+      "get": {
+        "summary": "Health check endpoint",
+        "responses": {
+          "200": {
+            "description": "API is operational"
+          }
+        }
+      }
+    },
+    "/api/v1/users": {
+      "get": {
+        "summary": "List users",
+        "responses": {
+          "200": {
+            "description": "User list"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,13 @@
+# Build artifacts
+/target
+
+# Private execution logs and verification reports
+TestDoc/
+
+# Local databases and SQLite journals
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+# Environment and secrets
+.env

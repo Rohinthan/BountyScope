@@ -1,0 +1,30 @@
+# BountyScope Target Scope Definition
+# Defines authorization boundaries and execution safety limits.
+
+program_name: "example-security-program"
+platform: "hackerone"
+
+# Allowed root and subdomains permitted for inspection
+allowed_domains:
+  - "example.com"
+  - "*.example.com"
+  - "127.0.0.1"
+
+# Explicitly excluded domains (third parties, out-of-scope targets)
+excluded_domains:
+  - "auth.example.com"
+  - "payment.example.com"
+  - "status.example.com"
+
+# Excluded URL path patterns (logout, account deletion, sensitive forms)
+excluded_paths:
+  - "/logout"
+  - "/delete-account"
+  - "/reset-password"
+  - "/admin/purge"
+
+# Rate limit in requests per second (must not exceed 2 rps by default)
+rate_limit_rps: 2
+
+# Safe mode enforces read-only passive inspections and non-destructive payloads
+safe_mode: true

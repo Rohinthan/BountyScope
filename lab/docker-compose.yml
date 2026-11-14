@@ -1,0 +1,24 @@
+services:
+  # OWASP Juice Shop: realistic vulnerable web application for security testing
+  juice-shop:
+    image: bkimminich/juice-shop:latest
+    container_name: bountyscope-lab-juiceshop
+    ports:
+      # Strictly bound to loopback to isolate target from external network interfaces
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=unsafe
+
+  # Lightweight mock API target simulating exposed specifications, CORS variations, and security headers
+  mock-api:
+    image: python:3.11-alpine
+    container_name: bountyscope-lab-mockapi
+    ports:
+      # Strictly bound to loopback interface
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./mock-server:/app:ro
+    command: python3 -m http.server 8080 --bind 0.0.0.0
