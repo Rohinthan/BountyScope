@@ -1,102 +1,154 @@
 # BountyScope
 
-**Version:** 0.14.0  
-**License:** MIT or Apache-2.0  
+[![Version](https://img.shields.io/badge/version-0.14.0-blue.svg)](file:///home/stringray/BountyScope/Cargo.toml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](file:///home/stringray/BountyScope/LICENSE)
 
-BountyScope is an automated vulnerability surface mapping and passive policy verification engine designed for authorized bug bounty assessments and defensive security reviews. The system enforces strict scope boundaries, deterministic rate limiting, and compile-time target guarantees to ensure all discovery and verification actions remain within defined rules of engagement.
-
----
-
-## Key Capabilities
-
-- **Compile-Time Scope Enforcement:** Prevents unintended network calls by enforcing the `VerifiedScopeUrl` type invariant on internal HTTP clients.
-- **Strict Scope Configuration & RoE Attribution:** Validates domains, wildcard subdomains, negative path exclusions, researcher handles (`X-Bug-Bounty` attribution), governing policy URLs, and program check exclusions (`excluded_checks`).
-- **Scope-Locked HTTP Client:** Outbound dispatcher strictly rejecting automatic redirects, enforcing rate limits, attaching attribution headers, and recording full audit trails.
-- **Embedded SQLite Storage:** Local persistence for scope definitions, mapped endpoints, and outbound interaction audit logs with WAL mode and foreign key enforcement.
-- **Surface Mapping:** Discovers endpoints from HTML structures, scripts, and standard metadata specifications without intrusive probing.
-- **Passive Policy Auditing:** Evaluates HTTP security headers, Cross-Origin Resource Sharing (CORS) configurations, and exposed OpenAPI/Swagger documentation.
-- **Isolated Local Test Environment:** Includes an offline Ubuntu Docker lab binding services strictly to loopback (`127.0.0.1`) for safe test execution.
+BountyScope is a scope-locked reconnaissance, passive policy auditing, and Model Context Protocol (MCP) triage command-line interface written in Rust. It is engineered for authorized bug bounty programs, defensive security reviews, and vulnerability disclosure assessments. The system guarantees strict scope boundaries, non-destructive policy evaluation, deterministic rate limiting, and compile-time target verification before executing any network interactions.
 
 ---
 
-## Architecture Overview
+## Core Safety Guarantees
+
+BountyScope enforces four architectural invariants across all discovery and audit flows:
+
+1. **Compile-Time Scope Enforcement (`VerifiedScopeUrl`):**
+   Outbound HTTP clients within the engine strictly require a `VerifiedScopeUrl` token as their target parameter. Because `VerifiedScopeUrl` has a private constructor that can only be minted by `ScopeEnforcer::validate_url()`, raw strings or unvalidated URLs cannot be dispatched across the network, eliminating scope escapes at compile time.
+
+2. **Path-Traversal and FQDN Normalization:**
+   Target URLs and candidate endpoints undergo strict canonicalization prior to boundary checks. The enforcer normalizes duplicate slashes (`//`), directory traversal sequences (`/..`, `/%2e%2e/`), and trailing domain dots (`example.com.` -> `example.com`), while matching wildcard DNS boundaries (`*.example.com`) against public suffix rules.
+
+3. **Deterministic Rate Limiting, Non-Redirecting Transport & Payload Ceiling:**
+   The network transport layer is configured with `reqwest::redirect::Policy::none()`, preventing automatic redirect following (HTTP 301/302/307/308) into unverified domains. Inter-request pacing is governed deterministically by `rate_limit_rps` (defaulting to 2 requests per second in safe mode), and streamed responses are constrained to a strict 5 MiB (`MAX_RESPONSE_BODY_BYTES`) ceiling to prevent unbounded memory consumption.
+
+4. **Stdio JSON-RPC 2.0 Framing Isolation:**
+   When running the native Model Context Protocol (MCP) server, all tracing, diagnostic logging, and error output are routed strictly to standard error (`stderr`). Standard output (`stdout`) is preserved exclusively for newline-delimited JSON-RPC 2.0 frames, preventing transport protocol corruption.
+
+---
+
+## Architecture Pipeline
+
+The following diagram illustrates the unidirectional data pipeline from configuration loading through scope enforcement, surface mapping, verification, and MCP serving:
 
 ```mermaid
-flowchart LR
-    A["Target Inputs & Scope Config"] --> B["Scope Enforcer"]
-    B -->|"VerifiedScopeUrl"| C["Surface Mapper"]
-    C -->|"Endpoints & Assets"| D["Safe Verification Runner"]
-    D -->|"Telemetry & Findings"| E["AI Triage & MCP Server"]
-    D -->|"Audit Logs"| F[("SQLite Storage Engine")]
-    E -->|"Contextual Queries"| F
+flowchart TD
+    Config["Scope Configuration (scope.yaml)"] --> Enforcer["Scope Enforcer"]
+    Enforcer -->|"VerifiedScopeUrl (Compile-Time Lock)"| Mapper["Surface Mapper"]
+    Enforcer -->|"VerifiedScopeUrl (Compile-Time Lock)"| Verifier["Safe Verification Runner"]
+    Mapper -->|"Discovered Endpoints"| Storage[("SQLite Database (WAL Mode)")]
+    Verifier -->|"Security Findings & Telemetry"| Storage
+    Storage --> Report["Report Generator (Markdown)"]
+    Storage --> MCP["Native MCP Server (stdio)"]
+    Enforcer -->|"Boundary Validation"| MCP
 ```
 
-1. **Scope Enforcer (`src/scope`):** Perimeter gateway enforcing domain, wildcard, and path boundaries, producing `VerifiedScopeUrl`.
-2. **Storage Engine (`src/storage`):** Thread-safe SQLite persistence layer enforcing WAL journal mode and foreign key integrity.
-3. **Scoped HTTP Client (`src/http`):** Scope-locked network dispatcher enforcing rate limiting and non-automatic redirect handling.
-4. **Surface Mapper:** Passive endpoint and asset extraction engine.
-5. **Safe Verification Runner:** Non-destructive policy and configuration auditor.
-6. **AI Triage & MCP Server:** Model Context Protocol interface exposing structured findings and contextual scope queries.
-
-For detailed technical documentation, refer to the [Doc/](file:///home/stringray/BountyScope/Doc) directory:
-- [01_SYSTEM_OVERVIEW.md](file:///home/stringray/BountyScope/Doc/01_SYSTEM_OVERVIEW.md)
-- [02_ARCHITECTURE.md](file:///home/stringray/BountyScope/Doc/02_ARCHITECTURE.md)
-- [03_SECURITY_CHECKS.md](file:///home/stringray/BountyScope/Doc/03_SECURITY_CHECKS.md)
-- [04_LOCAL_LAB_GUIDE.md](file:///home/stringray/BountyScope/Doc/04_LOCAL_LAB_GUIDE.md)
-
 ---
 
-## Safety Invariants
+## Installation & Prerequisites
 
-- **Compile-Time Scope Lock:** Outbound HTTP clients accept only `VerifiedScopeUrl` instances. Raw strings or unchecked URLs are rejected at compile time.
-- **No Automatic Redirect Following:** HTTP 301/302/307/308 redirects are never followed implicitly. The `Location` header is captured in response metadata and must be re-validated through `ScopeEnforcer`.
-- **Zero Panics in Runtime Paths:** All error states are handled via structured error types (`thiserror` and `anyhow`). Runtime code contains zero calls to `.unwrap()`, `.expect()`, or `panic!()`.
-- **Zero Unsafe Code:** The entire codebase operates strictly under safe Rust without `unsafe` blocks.
-- **Rate-Limiting & Safe Mode:** Default request rates do not exceed 2 requests per second unless explicitly configured. Destructive payloads, brute-force loops, and denial-of-service behaviors are strictly prohibited.
+### Prerequisites
 
----
+- **Rust Toolchain:** Rust 1.80+ (2021 edition) with `cargo`
+- **Ubuntu/Debian Build Dependencies:**
+  ```bash
+  sudo apt-get update
+  sudo apt-get install -y pkg-config libssl-dev libsqlite3-dev valgrind
+  ```
+- **Docker Compose:** (optional, required for running the local offline testing lab)
 
-## Prerequisites
-
-- **Rust:** 1.80+ (2021 or 2024 edition) with `cargo`
-- **C Compiler & Toolchain:** `gcc` or `clang`, `pkg-config`
-- **Valgrind:** 3.18+ (for deterministic memory leak verification)
-- **Docker Compose:** (optional, for running the local offline test lab)
-
----
-
-## Installation & Build
-
-Clone the repository and build using Cargo:
+### Building from Source
 
 ```bash
+# Clone repository
+git clone https://github.com/Rohinthan/BountyScope.git
+cd BountyScope
+
+# Build release binary
 cargo build --release
+
+# The compiled binary is available at target/release/bountyscope
+./target/release/bountyscope --version
 ```
 
-Run test suites and memory verification:
+### Quality and Verification Checks
 
 ```bash
-# Run unit and integration tests
-cargo test
-
-# Check code formatting and lints
+# Verify code formatting
 cargo fmt --check
+
+# Run static analysis and lints
 cargo clippy --all-targets --all-features -- -D warnings
+
+# Execute test suite
+cargo test
 ```
 
 ---
 
-## CLI Usage
+## Configuration Reference (`scope.yaml`)
 
-### Version Inspection
+BountyScope requires a YAML configuration file defining the program boundaries and Rules of Engagement (RoE).
 
-```bash
-bountyscope --version
+### Configuration Schema
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `program_name` | String | Yes | Unique program identifier. |
+| `platform` | String | Yes | Vulnerability disclosure platform (e.g., `hackerone`, `bugcrowd`, `intigriti`, `self_hosted`). |
+| `allowed_domains` | List of Strings | Yes | Authorized domain patterns and wildcard expressions (e.g., `example.com`, `*.example.com`). |
+| `excluded_domains` | List of Strings | No | Subdomains or third-party hosts explicitly excluded from testing. |
+| `excluded_paths` | List of Strings | No | URL path prefixes explicitly excluded (e.g., `/logout`, `/admin/delete`). |
+| `excluded_checks` | List of Strings | No | Finding types to skip during audits (e.g., `missing_security_headers`). |
+| `rate_limit_rps` | Integer | No | Maximum outbound requests per second (default: `2`). |
+| `safe_mode` | Boolean | No | Enforces safe read-only testing defaults (default: `true`). |
+| `researcher_handle` | String | No | Attaches `X-Bug-Bounty: <handle>` header to outbound HTTP requests for attribution. |
+| `policy_url` | String | No | URL to the governing bug bounty policy or Safe Harbor terms. |
+
+### Example Configuration (`configs/scope.example.yaml`)
+
+```yaml
+program_name: "example-security-program"
+platform: "hackerone"
+allowed_domains:
+  - "example.com"
+  - "*.example.com"
+  - "127.0.0.1"
+
+excluded_domains:
+  - "auth.example.com"
+  - "payments.example.com"
+  - "status.example.com"
+
+excluded_paths:
+  - "/logout"
+  - "/oauth/revoke"
+  - "/account/delete"
+  - "/api/v1/auth/signout"
+
+excluded_checks:
+  - "missing_security_headers"
+
+rate_limit_rps: 2
+safe_mode: true
+researcher_handle: "security-researcher"
+policy_url: "https://hackerone.com/example-security-program"
 ```
 
-### Validate Target Scope Configuration
+---
 
-Validate target boundary rules against the scope schema:
+## CLI Command Reference
+
+BountyScope provides a suite of subcommands for validation, passive mapping, verification, reporting, and MCP integration:
+
+| Command | Purpose | Input Flags | Output |
+|---|---|---|---|
+| `validate-scope` | Verifies YAML syntax and scope boundary integrity. | `--config` | Console validation summary |
+| `probe` | Safely evaluates and probes a single in-scope URL. | `--config`, `--url`, `--db` | HTTP status, headers, audit log entry |
+| `map` | Passively extracts links, scripts, and API specs from a seed URL. | `--config`, `--url`, `--db` | Discovered endpoints in SQLite |
+| `audit` | Evaluates HTTP headers, CORS policies, and spec disclosures. | `--config`, `--db` | Audit findings summary |
+| `report` | Generates a Markdown assessment report with findings and evidence. | `--config`, `--db`, `[--output]` | Markdown report (stdout or file) |
+| `mcp` | Launches the Model Context Protocol server over standard I/O (`stdio`). | `--config`, `--db` | JSON-RPC 2.0 protocol on stdout |
+
+### 1. Validate Scope Configuration
 
 ```bash
 bountyscope validate-scope --config configs/scope.example.yaml
@@ -107,9 +159,7 @@ Sample output:
 Scope configuration valid: example-security-program (platform: hackerone, allowed_domains: 3, excluded_domains: 3, excluded_paths: 4, rate_limit_rps: 2, safe_mode: true)
 ```
 
-### Safely Probe Target URL
-
-Validate a target URL against scope rules, dispatch a single safe GET request, and record the interaction in SQLite:
+### 2. Safely Probe Target Endpoint
 
 ```bash
 bountyscope probe --config configs/scope.example.yaml --url http://127.0.0.1:8080/openapi.json --db data/bountyscope.db
@@ -120,9 +170,7 @@ Sample output:
 Probe successful: http://127.0.0.1:8080/openapi.json -> HTTP 200 (application/json, 538 bytes, 3 ms)
 ```
 
-### Passively Map Attack Surface
-
-Initiate passive surface mapping from an in-scope seed URL:
+### 3. Passively Map Attack Surface
 
 ```bash
 bountyscope map --config configs/scope.example.yaml --url http://127.0.0.1:8080/ --db data/bountyscope.db
@@ -142,9 +190,7 @@ Surface mapping complete for http://127.0.0.1:8080/: 14 endpoints discovered (9 
   [openapi_spec] http://127.0.0.1:8080/openapi.json (HTTP 200)
 ```
 
-### Audit Mapped Endpoints
-
-Execute safe, non-destructive policy and configuration checks across mapped endpoints:
+### 4. Audit Mapped Endpoints
 
 ```bash
 bountyscope audit --config configs/scope.example.yaml --db data/bountyscope.db
@@ -160,35 +206,53 @@ Audit completed for program 'example-security-program': 9 endpoints audited, 6 t
   INFO:     1
 ```
 
-### Generate Assessment Markdown Report
-
-Render assessment findings, severity breakdowns, and remediation guidance into Markdown:
+### 5. Generate Assessment Markdown Report
 
 ```bash
-# Export to a Markdown report file
+# Export to a file
 bountyscope report --config configs/scope.example.yaml --db data/bountyscope.db --output report.md
 
 # Print directly to standard output
 bountyscope report --config configs/scope.example.yaml --db data/bountyscope.db
 ```
 
-### Model Context Protocol (MCP) Server
-
-Launch the native MCP server communicating over standard I/O (`stdio`):
+### 6. Serve Model Context Protocol (MCP)
 
 ```bash
 bountyscope mcp --config configs/scope.example.yaml --db data/bountyscope.db
 ```
 
-The server exposes four tools for AI agents and automated workflows:
-- `check_target_scope`: Validates target URLs against active scope boundaries before dispatch.
-- `list_mapped_endpoints`: Queries discovered surface endpoints stored in SQLite.
-- `list_security_findings`: Queries security findings filtered optionally by severity.
-- `generate_assessment_report`: Synthesizes an end-to-end Markdown assessment report.
+---
 
-#### MCP Client Integration
+## Model Context Protocol (MCP) Integration
 
-Add BountyScope to your MCP client configuration (e.g., `mcp_config.json`):
+BountyScope implements a native Model Context Protocol (MCP) server conforming to JSON-RPC 2.0 specifications via `rmcp`. It enables external AI coding assistants, autonomous security agents, and defensive consoles to query scope boundaries and assessment findings.
+
+### Exposed MCP Tools
+
+1. **`check_target_scope`**
+   - **Input:** `{ "url": "https://example.com/api/v1" }`
+   - **Output:** `{ "allowed": true, "normalized_url": "https://example.com/api/v1", "reason": null }`
+   - **Function:** Allows external AI agents to verify whether a URL is in-scope prior to taking actions.
+
+2. **`list_mapped_endpoints`**
+   - **Input:** `{ "limit": 50 }`
+   - **Output:** Array of discovered endpoint records (`url`, `host`, `path`, `status_code`, `discovered_via`).
+   - **Function:** Retrieves attack surface inventory stored in SQLite.
+
+3. **`list_security_findings`**
+   - **Input:** `{ "severity": "HIGH" }` (optional filter: `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO`)
+   - **Output:** Array of verified findings (`id`, `finding_type`, `severity`, `title`, `target_url`, `evidence`, `remediation`).
+   - **Function:** Queries verified security findings and policy violations.
+
+4. **`generate_assessment_report`**
+   - **Input:** `{}`
+   - **Output:** `{ "report": "# Security Assessment Report: ...\n..." }`
+   - **Function:** Returns the full synthesized Markdown assessment report.
+
+### MCP Client Configuration
+
+Add BountyScope to your MCP client configuration (such as Antigravity IDE `~/.gemini/antigravity/mcp_config.json` or Claude Desktop `claude_desktop_config.json`):
 
 ```json
 {
@@ -197,10 +261,8 @@ Add BountyScope to your MCP client configuration (e.g., `mcp_config.json`):
       "command": "bountyscope",
       "args": [
         "mcp",
-        "--config",
-        "configs/scope.example.yaml",
-        "--db",
-        "data/bountyscope.db"
+        "--config", "configs/scope.example.yaml",
+        "--db", "data/bountyscope.db"
       ]
     }
   }
@@ -209,16 +271,51 @@ Add BountyScope to your MCP client configuration (e.g., `mcp_config.json`):
 
 ---
 
-## Local Testing Lab
+## Offline Local Testing Lab
 
-An offline local testing lab is available in `lab/` featuring OWASP Juice Shop and a mock API server bound strictly to loopback (`127.0.0.1`):
+An offline local testing lab is provided in [lab/](file:///home/stringray/BountyScope/lab) featuring OWASP Juice Shop and a mock vulnerable API server bound strictly to loopback (`127.0.0.1`):
 
 ```bash
+# Navigate to lab directory and start services
 cd lab
 docker compose up -d
-bountyscope validate-scope --config configs/scope.example.yaml
-bountyscope probe --config configs/scope.example.yaml --url http://127.0.0.1:8080/openapi.json --db data/bountyscope.db
+
+# Verify services are responsive
+curl -s http://127.0.0.1:3000/ | head -n 5
+curl -s http://127.0.0.1:8080/openapi.json | head -n 5
+
+# Run surface mapping and verification against local lab
+cd ..
+bountyscope map --config configs/scope.example.yaml --url http://127.0.0.1:8080/ --db data/bountyscope.db
+bountyscope audit --config configs/scope.example.yaml --db data/bountyscope.db
+bountyscope report --config configs/scope.example.yaml --db data/bountyscope.db
+
+# Stop lab services
+cd lab
 docker compose down
 ```
 
-See [Doc/04_LOCAL_LAB_GUIDE.md](file:///home/stringray/BountyScope/Doc/04_LOCAL_LAB_GUIDE.md) for full instructions.
+See [Doc/04_LOCAL_LAB_GUIDE.md](file:///home/stringray/BountyScope/Doc/04_LOCAL_LAB_GUIDE.md) for complete details on lab architecture and target endpoints.
+
+---
+
+## Technical Documentation Index
+
+Detailed architectural and implementation documentation is available in the [Doc/](file:///home/stringray/BountyScope/Doc) directory:
+
+- [01_SYSTEM_OVERVIEW.md](file:///home/stringray/BountyScope/Doc/01_SYSTEM_OVERVIEW.md): Mission, scope governance model, and pipeline summary.
+- [02_ARCHITECTURE.md](file:///home/stringray/BountyScope/Doc/02_ARCHITECTURE.md): Component diagrams, `VerifiedScopeUrl` state pattern, SQLite schema, and MCP server design.
+- [03_SECURITY_CHECKS.md](file:///home/stringray/BountyScope/Doc/03_SECURITY_CHECKS.md): Check logic for headers, CORS, OpenAPI specs, static asset exemptions, and false-positive filtering.
+- [04_LOCAL_LAB_GUIDE.md](file:///home/stringray/BountyScope/Doc/04_LOCAL_LAB_GUIDE.md): Lab configuration, mock API definitions, and testing workflows.
+
+---
+
+## Authorized Use & License
+
+### Authorized Use Notice
+
+BountyScope is designed exclusively for authorized penetration testing, bug bounty programs, and defensive vulnerability assessments conducted in full compliance with applicable laws, Terms of Service, and program Rules of Engagement. Unauthorized network probing or scanning of systems without explicit written permission is strictly prohibited.
+
+### License
+
+This project is licensed under the **Apache License, Version 2.0**. See the [LICENSE](file:///home/stringray/BountyScope/LICENSE) file for the full license text.
