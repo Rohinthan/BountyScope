@@ -11,3 +11,6 @@ data/*.db-shm
 
 # Environment and secrets
 .env
+
+# Agent skills and configurations
+.agents/
