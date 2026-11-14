@@ -87,6 +87,116 @@ cargo test
 
 ---
 
+## Quick Start: Testing Against a Sample Webpage
+
+This walkthrough demonstrates how to test BountyScope against a local sample webpage from scratch in four steps.
+
+### Step 1: Start a Sample Web Server
+
+You can test either with a lightweight Python HTTP server or with the repository's built-in Docker lab.
+
+#### Option A: Lightweight Python HTTP Server (No Docker required)
+
+In a separate terminal, create a directory with a sample HTML page containing links and start a local server on port `8080`:
+
+```bash
+mkdir -p ~/sample-target
+cd ~/sample-target
+
+cat << 'EOF' > index.html
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Sample Target Application</title>
+</head>
+<body>
+    <h1>Local Test Webpage</h1>
+    <nav>
+        <a href="/dashboard">User Dashboard</a>
+        <a href="/api/v1/users">API Users</a>
+        <a href="/openapi.json">API Documentation</a>
+    </nav>
+    <script>
+        const API_ROUTE = "/api/v2/telemetry";
+    </script>
+</body>
+</html>
+EOF
+
+# Start listening on 127.0.0.1:8080
+python3 -m http.server 8080 --bind 127.0.0.1
+```
+
+#### Option B: Built-In Docker Lab
+
+If Docker is available, launch the included test environment (OWASP Juice Shop and mock API):
+
+```bash
+cd lab
+docker compose up -d
+cd ..
+```
+
+### Step 2: Define Target Scope (`scope.yaml`)
+
+BountyScope enforces a **fail-closed** policy: it will **refuse to send any HTTP requests** to a host unless that host is explicitly declared in `allowed_domains`.
+
+Create `scope.local.yaml` in your project root:
+
+```yaml
+program_name: "local-sample-target"
+platform: "local"
+
+allowed_domains:
+  - "127.0.0.1"
+  - "localhost"
+
+excluded_domains: []
+excluded_paths:
+  - "/logout"
+
+rate_limit_rps: 5
+safe_mode: true
+```
+
+Validate the scope configuration:
+
+```bash
+bountyscope validate-scope --config scope.local.yaml
+```
+
+### Step 3: Run the Unified Assessment Scan
+
+Execute surface mapping, passive policy verification, and Markdown report export in a single command:
+
+```bash
+bountyscope scan --config scope.local.yaml --url http://127.0.0.1:8080/
+```
+
+What BountyScope executes during this scan:
+1. **Scope Verification:** Confirms `http://127.0.0.1:8080/` matches an authorized rule in `scope.local.yaml` before dispatching any network packets.
+2. **Surface Mapping:** Crawls the seed page, parses DOM links (`/dashboard`, `/api/v1/users`, `/openapi.json`), extracts inline script routes (`/api/v2/telemetry`), and discards out-of-scope URLs.
+3. **Security Policy Auditing:** Tests each in-scope endpoint for missing security headers (Content-Security-Policy, X-Frame-Options, X-Content-Type-Options), CORS policy misconfigurations, and technology banner disclosures.
+4. **Data Persistence:** Writes all discovered endpoints and findings into `data/local_sample_target.db`.
+5. **Report Generation:** Generates the structured Markdown report at `data/local_sample_target_report.md`.
+
+### Step 4: Review Assessment Artifacts
+
+Display the generated Markdown report:
+
+```bash
+cat data/local_sample_target_report.md
+```
+
+You can also inspect the SQLite database directly:
+
+```bash
+sqlite3 data/local_sample_target.db "SELECT url, discovered_via, status_code FROM endpoints;"
+sqlite3 data/local_sample_target.db "SELECT severity, finding_type, title FROM findings;"
+```
+
+---
+
 ## Configuration Reference (`scope.yaml`)
 
 BountyScope requires a YAML configuration file defining the program boundaries and Rules of Engagement (RoE).
@@ -169,6 +279,24 @@ Similarly, `--output` on `report` and `scan` defaults to `data/<sanitized_progra
 | `audit` | Evaluates HTTP headers, CORS policies, and spec disclosures. | `[--config]`, `[--db]` | Audit findings summary |
 | `report` | Generates a Markdown assessment report with findings and evidence. | `[--config]`, `[--db]`, `[--output]`, `[--stdout]` | Markdown report (file or stdout) |
 | `mcp` | Launches the Model Context Protocol server over standard I/O (`stdio`). | `[--config]`, `[--db]` | JSON-RPC 2.0 protocol on stdout |
+
+### Lifecycle & State Modifications (What Changes on Each Run)
+
+Understanding the exact network, database, and filesystem modifications executed by each command:
+
+| Command | Network Activity | SQLite Database Changes | Filesystem Changes | Idempotency on Re-running |
+|---|---|---|---|---|
+| `validate-scope` | **Zero requests** (Offline) | **None** | **None** | Completely safe; validates syntax and exits. |
+| `scan` | Sends rate-limited GET requests to discover and audit endpoints | Populates and updates `programs`, `scope_rules`, `endpoints`, `findings`, and `audit_logs` | Creates/updates `data/<program>.db` and writes `data/<program>_report.md` | Re-running refreshes existing records and updates timestamps without duplicating rows. |
+| `probe` | Sends exactly **1 HTTP GET request** to the target URL | Appends a single row to the `audit_logs` table | Creates parent `data/` directory and database file if not already present | Safe to re-run; appends an additional audit log record with new latency and timestamp. |
+| `map` | Sends rate-limited GET requests to crawl HTML links, script tags, routes, and `robots.txt` | Upserts discovered URLs into `endpoints`; appends each request to `audit_logs` | Creates/updates `data/<program>.db` | Re-running updates `last_verified_at` timestamps on existing endpoints without creating duplicate rows. |
+| `audit` | Sends non-destructive GET requests with audit test headers (CORS origins, spec paths) | Upserts policy violations into `findings`; appends each check to `audit_logs` | Updates `data/<program>.db` | Re-running updates existing finding evidence in place; does not multiply finding counts. |
+| `report` | **Zero requests** (Offline) | **None** (Read-only query of existing records) | Writes or updates `data/<program>_report.md` (or prints to terminal if `--stdout` is set) | Completely idempotent; reconstructs the report directly from current database state. |
+| `mcp` | Zero autonomous requests (Queries driven by connected AI assistant) | Reads `endpoints` and `findings`; evaluates scope boundaries via `ScopeEnforcer` | **None** (Communicates over stdio JSON-RPC 2.0) | Continuous streaming process. |
+
+#### Idempotency Invariant
+
+BountyScope enforces database idempotency across all commands. The storage engine uses SQLite unique constraints (`ON CONFLICT(url) DO UPDATE` for endpoints and `ON CONFLICT(program_id, endpoint_id, finding_type) DO UPDATE` for findings). Running `map`, `audit`, or `scan` multiple times against the same target will refresh verification timestamps and update evidence rather than bloating your database with redundant duplicate entries.
 
 ### 1. Unified Assessment Scan (`bountyscope scan`)
 
