@@ -1,7 +1,7 @@
 # BountyScope
 
-[![Version](https://img.shields.io/badge/version-0.14.0-blue.svg)](file:///home/stringray/BountyScope/Cargo.toml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](file:///home/stringray/BountyScope/LICENSE)
+[![Version](https://img.shields.io/badge/version-0.14.0-blue.svg)](Cargo.toml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
 BountyScope is a scope-locked reconnaissance, passive policy auditing, and Model Context Protocol (MCP) triage command-line interface written in Rust. It is engineered for authorized bug bounty programs, defensive security reviews, and vulnerability disclosure assessments. The system guarantees strict scope boundaries, non-destructive policy evaluation, deterministic rate limiting, and compile-time target verification before executing any network interactions.
 
@@ -43,33 +43,54 @@ flowchart TD
 
 ---
 
-## Installation & Prerequisites
+## Installation & Cross-Platform Support
+
+`BountyScope` compiles natively on **Linux**, **macOS**, and **Windows** using `rustls` and bundled SQLite (`rusqlite`), requiring no external OpenSSL or system SQLite runtime libraries.
+
+### Platform Support
+
+| Operating System | Architecture | Default Binary Location |
+| :--- | :--- | :--- |
+| **Linux** (Ubuntu, Debian, Fedora, Arch) | `x86_64`, `aarch64` | `~/.cargo/bin/bountyscope` |
+| **macOS** (Apple Silicon & Intel) | `aarch64`, `x86_64` | `~/.cargo/bin/bountyscope` |
+| **Windows** (Windows 10 / 11) | `x86_64`, `aarch64` | `%USERPROFILE%\.cargo\bin\bountyscope.exe` |
 
 ### Prerequisites
 
-- **Rust Toolchain:** Rust 1.80+ (2021 edition) with `cargo`
-- **Ubuntu/Debian Build Dependencies:**
-  ```bash
-  sudo apt-get update
-  sudo apt-get install -y pkg-config libssl-dev libsqlite3-dev valgrind
-  ```
-- **Docker Compose:** (optional, required for running the local offline testing lab)
+- **Rust Toolchain:** Rust 1.80+ (2021 edition) with `cargo` (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
+- **Git**
+- **Docker Compose:** (optional, required only for running the offline local lab)
 
-### Building from Source
+### Installation & Verification
+
+#### Linux & macOS (bash / zsh)
 
 ```bash
 # Clone repository
 git clone https://github.com/Rohinthan/BountyScope.git
 cd BountyScope
 
-# Build release binary
-cargo build --release
-
-# Install globally to ~/.cargo/bin
+# Build and install release binary to ~/.cargo/bin
 cargo install --path .
 
-# The binary is available on PATH as bountyscope
-bountyscope --version
+# Verify installation
+export BOUNTYSCOPE_CONFIG="configs/scope.example.yaml"
+bountyscope validate-scope
+```
+
+#### Windows (PowerShell)
+
+```powershell
+# Clone repository
+git clone https://github.com/Rohinthan/BountyScope.git
+cd BountyScope
+
+# Build and install release binary to %USERPROFILE%\.cargo\bin
+cargo install --path .
+
+# Verify installation
+$env:BOUNTYSCOPE_CONFIG = "configs\scope.example.yaml"
+bountyscope validate-scope
 ```
 
 ### Quality and Verification Checks
@@ -87,57 +108,16 @@ cargo test
 
 ---
 
-## Cross-Platform Support
+## Quick Start: Run Straight in Terminal
 
-`BountyScope` compiles natively on **Linux**, **macOS**, and **Windows** using `rustls` and bundled SQLite (`rusqlite`), requiring no external OpenSSL or system SQLite libraries at runtime.
+Copy and paste these four blocks directly into your terminal to test `BountyScope` end-to-end against a local sample webpage without manually editing files.
 
-| Operating System | Architecture | Binary Output |
-| :--- | :--- | :--- |
-| **Linux** (Ubuntu, Debian, Fedora, Arch) | `x86_64`, `aarch64` | `~/.cargo/bin/bountyscope` |
-| **macOS** (Apple Silicon & Intel) | `aarch64`, `x86_64` | `~/.cargo/bin/bountyscope` |
-| **Windows** (Windows 10 / 11) | `x86_64`, `aarch64` | `%USERPROFILE%\.cargo\bin\bountyscope.exe` |
+### Step 1: Create and Start a Sample Web Server
 
-### Installation & Quick Verification by OS
-
-#### Linux & macOS (bash / zsh)
+In a separate terminal tab, create a sample `index.html` and start Python's built-in server on `127.0.0.1:8080`:
 
 ```bash
-git clone https://github.com/Rohinthan/BountyScope.git
-cd BountyScope
-cargo install --path .
-
-export BOUNTYSCOPE_CONFIG=configs/scope.example.yaml
-bountyscope validate-scope
-```
-
-#### Windows (PowerShell)
-
-```powershell
-git clone https://github.com/Rohinthan/BountyScope.git
-cd BountyScope
-cargo install --path .
-
-$env:BOUNTYSCOPE_CONFIG = "configs\scope.example.yaml"
-bountyscope validate-scope
-```
-
----
-
-## Quick Start: Testing Against a Sample Webpage
-
-This walkthrough demonstrates how to test BountyScope against a local sample webpage from scratch in four steps.
-
-### Step 1: Start a Sample Web Server
-
-You can test either with a lightweight Python HTTP server or with the repository's built-in Docker lab.
-
-#### Option A: Lightweight Python HTTP Server (No Docker required)
-
-In a separate terminal, create a directory with a sample HTML page containing links and start a local server on port `8080`:
-
-```bash
-mkdir -p ~/sample-target
-cd ~/sample-target
+mkdir -p ~/sample-target && cd ~/sample-target
 
 cat << 'EOF' > index.html
 <!DOCTYPE html>
@@ -159,27 +139,17 @@ cat << 'EOF' > index.html
 </html>
 EOF
 
-# Start listening on 127.0.0.1:8080
 python3 -m http.server 8080 --bind 127.0.0.1
 ```
 
-#### Option B: Built-In Docker Lab
+### Step 2: Define Target Scope (`data/scope.local.yaml`)
 
-If Docker is available, launch the included test environment (OWASP Juice Shop and mock API):
+In your BountyScope repository root, create `data/scope.local.yaml` (placed inside `data/` to ensure it is automatically ignored by Git):
 
 ```bash
-cd lab
-docker compose up -d
-cd ..
-```
+mkdir -p data
 
-### Step 2: Define Target Scope (`scope.yaml`)
-
-BountyScope enforces a **fail-closed** policy: it will **refuse to send any HTTP requests** to a host unless that host is explicitly declared in `allowed_domains`.
-
-Create `scope.local.yaml` in your project root:
-
-```yaml
+cat << 'EOF' > data/scope.local.yaml
 program_name: "local-sample-target"
 platform: "local"
 
@@ -193,42 +163,23 @@ excluded_paths:
 
 rate_limit_rps: 5
 safe_mode: true
+EOF
+
+bountyscope validate-scope --config data/scope.local.yaml
 ```
 
-Validate the scope configuration:
+### Step 3: Run the Unified Scan
+
+Map the surface, audit response headers, save to SQLite (`data/local_sample_target.db`), and export the Markdown report (`data/local_sample_target_report.md`) in one command:
 
 ```bash
-bountyscope validate-scope --config scope.local.yaml
+bountyscope scan --config data/scope.local.yaml --url http://127.0.0.1:8080/
 ```
 
-### Step 3: Run the Unified Assessment Scan
-
-Execute surface mapping, passive policy verification, and Markdown report export in a single command:
-
-```bash
-bountyscope scan --config scope.local.yaml --url http://127.0.0.1:8080/
-```
-
-What BountyScope executes during this scan:
-1. **Scope Verification:** Confirms `http://127.0.0.1:8080/` matches an authorized rule in `scope.local.yaml` before dispatching any network packets.
-2. **Surface Mapping:** Crawls the seed page, parses DOM links (`/dashboard`, `/api/v1/users`, `/openapi.json`), extracts inline script routes (`/api/v2/telemetry`), and discards out-of-scope URLs.
-3. **Security Policy Auditing:** Tests each in-scope endpoint for missing security headers (Content-Security-Policy, X-Frame-Options, X-Content-Type-Options), CORS policy misconfigurations, and technology banner disclosures.
-4. **Data Persistence:** Writes all discovered endpoints and findings into `data/local_sample_target.db`.
-5. **Report Generation:** Generates the structured Markdown report at `data/local_sample_target_report.md`.
-
-### Step 4: Review Assessment Artifacts
-
-Display the generated Markdown report:
+### Step 4: View the Generated Report
 
 ```bash
 cat data/local_sample_target_report.md
-```
-
-You can also inspect the SQLite database directly:
-
-```bash
-sqlite3 data/local_sample_target.db "SELECT url, discovered_via, status_code FROM endpoints;"
-sqlite3 data/local_sample_target.db "SELECT severity, finding_type, title FROM findings;"
 ```
 
 ---
@@ -489,7 +440,7 @@ Add BountyScope to your MCP client configuration (such as Antigravity IDE `~/.ge
 
 ## Offline Local Testing Lab
 
-An offline local testing lab is provided in [lab/](file:///home/stringray/BountyScope/lab) featuring OWASP Juice Shop and a mock vulnerable API server bound strictly to loopback (`127.0.0.1`):
+An offline local testing lab is provided in [lab/](lab/) featuring OWASP Juice Shop and a mock vulnerable API server bound strictly to loopback (`127.0.0.1`):
 
 ```bash
 # Navigate to lab directory and start services
@@ -500,30 +451,33 @@ docker compose up -d
 curl -s http://127.0.0.1:3000/ | head -n 5
 curl -s http://127.0.0.1:8080/openapi.json | head -n 5
 
-# Run surface mapping and verification against local lab
+# Execute unified scan against the local lab
 cd ..
-bountyscope map --config configs/scope.example.yaml --url http://127.0.0.1:8080/ --db data/bountyscope.db
-bountyscope audit --config configs/scope.example.yaml --db data/bountyscope.db
-bountyscope report --config configs/scope.example.yaml --db data/bountyscope.db
+bountyscope scan --config configs/scope.local.yaml --url http://127.0.0.1:8080/
+
+# Or run individual pipeline stages
+bountyscope map --config configs/scope.local.yaml --url http://127.0.0.1:8080/
+bountyscope audit --config configs/scope.local.yaml
+bountyscope report --config configs/scope.local.yaml --stdout
 
 # Stop lab services
 cd lab
 docker compose down
 ```
 
-See [Doc/04_LOCAL_LAB_GUIDE.md](file:///home/stringray/BountyScope/Doc/04_LOCAL_LAB_GUIDE.md) for complete details on lab architecture and target endpoints.
+See [Doc/04_LOCAL_LAB_GUIDE.md](Doc/04_LOCAL_LAB_GUIDE.md) for complete details on lab architecture and target endpoints.
 
 ---
 
 ## Technical Documentation Index
 
-Detailed architectural and implementation documentation is available in the [Doc/](file:///home/stringray/BountyScope/Doc) directory:
+Detailed architectural and implementation documentation is available in the [Doc/](Doc/) directory:
 
-- [01_SYSTEM_OVERVIEW.md](file:///home/stringray/BountyScope/Doc/01_SYSTEM_OVERVIEW.md): Mission, scope governance model, and pipeline summary.
-- [02_ARCHITECTURE.md](file:///home/stringray/BountyScope/Doc/02_ARCHITECTURE.md): Component diagrams, `VerifiedScopeUrl` state pattern, SQLite schema, and MCP server design.
-- [03_SECURITY_CHECKS.md](file:///home/stringray/BountyScope/Doc/03_SECURITY_CHECKS.md): Check logic for headers, CORS, OpenAPI specs, static asset exemptions, and false-positive filtering.
-- [04_LOCAL_LAB_GUIDE.md](file:///home/stringray/BountyScope/Doc/04_LOCAL_LAB_GUIDE.md): Lab configuration, mock API definitions, and testing workflows.
-- [05_TECHNICAL_REFERENCE.md](file:///home/stringray/BountyScope/Doc/05_TECHNICAL_REFERENCE.md): Consolidated technical reference synthesizing system architecture, canonicalization, persistence, security checks, and CLI ergonomics.
+- [01_SYSTEM_OVERVIEW.md](Doc/01_SYSTEM_OVERVIEW.md): Mission, scope governance model, and pipeline summary.
+- [02_ARCHITECTURE.md](Doc/02_ARCHITECTURE.md): Component diagrams, `VerifiedScopeUrl` state pattern, SQLite schema, and MCP server design.
+- [03_SECURITY_CHECKS.md](Doc/03_SECURITY_CHECKS.md): Check logic for headers, CORS, OpenAPI specs, static asset exemptions, and false-positive filtering.
+- [04_LOCAL_LAB_GUIDE.md](Doc/04_LOCAL_LAB_GUIDE.md): Lab configuration, mock API definitions, and testing workflows.
+- [05_TECHNICAL_REFERENCE.md](Doc/05_TECHNICAL_REFERENCE.md): Consolidated technical reference synthesizing system architecture, canonicalization, persistence, security checks, and CLI ergonomics.
 
 ---
 
@@ -535,4 +489,4 @@ BountyScope is designed exclusively for authorized penetration testing, bug boun
 
 ### License
 
-This project is licensed under the **Apache License, Version 2.0**. See the [LICENSE](file:///home/stringray/BountyScope/LICENSE) file for the full license text.
+This project is licensed under the **Apache License, Version 2.0**. See the [LICENSE](LICENSE) file for the full license text.
