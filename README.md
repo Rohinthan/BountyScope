@@ -120,6 +120,28 @@ Sample output:
 Probe successful: http://127.0.0.1:8080/openapi.json -> HTTP 200 (application/json, 538 bytes, 3 ms)
 ```
 
+### Passively Map Attack Surface
+
+Initiate passive surface mapping from an in-scope seed URL:
+
+```bash
+bountyscope map --config configs/scope.example.yaml --url http://127.0.0.1:8080/ --db data/bountyscope.db
+```
+
+Sample output:
+```text
+Surface mapping complete for http://127.0.0.1:8080/: 14 endpoints discovered (9 in-scope, 5 out-of-scope discarded)
+  [seed] http://127.0.0.1:8080/ (HTTP 200)
+  [html_link] http://127.0.0.1:8080/dashboard (unprobed)
+  [html_script] http://127.0.0.1:8080/static/app.js (HTTP 200)
+  [js_route] http://127.0.0.1:8080/api/v1/users (unprobed)
+  [js_route] http://127.0.0.1:8080/api/v2/metrics (unprobed)
+  [js_route] http://127.0.0.1:8080/graphql (unprobed)
+  [robots_txt] http://127.0.0.1:8080/robots.txt (HTTP 200)
+  [robots_txt] http://127.0.0.1:8080/admin (unprobed)
+  [openapi_spec] http://127.0.0.1:8080/openapi.json (HTTP 200)
+```
+
 ---
 
 ## Local Testing Lab

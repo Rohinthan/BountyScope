@@ -56,9 +56,37 @@ pub enum HttpError {
     #[error("Network dispatch error: {0}")]
     Network(String),
 
+    #[error("Response body exceeded maximum allowed size of {0} bytes (limit: {1} bytes)")]
+    PayloadTooLarge(usize, usize),
+
     #[error("Storage error during HTTP operation: {0}")]
     Storage(#[from] StorageError),
 
     #[error("Scope error during HTTP operation: {0}")]
     Scope(#[from] ScopeError),
+}
+
+/// Structured errors for passive surface mapping operations.
+#[derive(Debug, Error)]
+pub enum MapperError {
+    #[error("Scope error during surface mapping: {0}")]
+    Scope(#[from] ScopeError),
+
+    #[error("HTTP error during surface mapping: {0}")]
+    Http(#[from] HttpError),
+
+    #[error("Storage error during surface mapping: {0}")]
+    Storage(#[from] StorageError),
+
+    #[error("URL parsing error during surface mapping: {0}")]
+    Url(#[from] url::ParseError),
+
+    #[error("JSON parsing error during surface mapping: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("HTML/CSS selector parsing error: {0}")]
+    Selector(String),
+
+    #[error("Regex compilation error: {0}")]
+    Regex(#[from] regex::Error),
 }

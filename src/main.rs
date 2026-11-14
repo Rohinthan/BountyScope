@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use bountyscope::http::ScopedHttpClient;
+use bountyscope::mapper::SurfaceMapper;
 use bountyscope::scope::{ScopeConfig, ScopeEnforcer};
 use bountyscope::storage::StorageEngine;
 use clap::{Parser, Subcommand};
@@ -40,6 +41,21 @@ enum Commands {
         #[arg(short, long, default_value = "data/bountyscope.db")]
         db: PathBuf,
     },
+
+    /// Passively map the attack surface starting from an in-scope seed URL
+    Map {
+        /// Path to scope configuration YAML file
+        #[arg(short, long, default_value = "configs/scope.example.yaml")]
+        config: PathBuf,
+
+        /// Seed URL to initiate passive surface mapping
+        #[arg(short, long)]
+        url: String,
+
+        /// Path to local SQLite database file
+        #[arg(short, long, default_value = "data/bountyscope.db")]
+        db: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -56,6 +72,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Commands::ValidateScope { config }) => execute_validate_scope(&config),
         Some(Commands::Probe { config, url, db }) => execute_probe(&config, &url, &db).await,
+        Some(Commands::Map { config, url, db }) => execute_map(&config, &url, &db).await,
         None => {
             println!("BountyScope v0.14.0 - Vulnerability Surface Mapping Engine");
             println!("Run 'bountyscope --help' for available commands.");
@@ -127,6 +144,59 @@ async fn execute_probe(config_path: &PathBuf, url_str: &str, db_path: &PathBuf) 
         response.duration_ms,
         redirect_info
     );
+
+    Ok(())
+}
+
+async fn execute_map(config_path: &PathBuf, url_str: &str, db_path: &PathBuf) -> Result<()> {
+    let config = ScopeConfig::from_file(config_path)
+        .with_context(|| format!("Failed to load scope configuration from {:?}", config_path))?;
+
+    let enforcer = ScopeEnforcer::new(config.clone())
+        .with_context(|| "Scope configuration failed validation rules")?;
+
+    let verified_seed = enforcer
+        .validate_url(url_str)
+        .with_context(|| format!("Seed URL '{url_str}' is not within authorized scope"))?;
+
+    let storage = StorageEngine::open(db_path)
+        .with_context(|| format!("Failed to initialize database at {:?}", db_path))?;
+
+    let program_id = storage
+        .upsert_program_scope(&config)
+        .with_context(|| "Failed to upsert target scope in database")?;
+
+    let client = ScopedHttpClient::new(storage.clone(), program_id.clone(), config.rate_limit_rps)
+        .with_context(|| "Failed to initialize scoped HTTP client")?;
+
+    let mapper = SurfaceMapper::new(&enforcer, &client, &storage, program_id)
+        .with_context(|| "Failed to initialize surface mapper")?;
+
+    let result = mapper.map(&verified_seed).await.with_context(|| {
+        format!(
+            "Surface mapping failed for seed '{}'",
+            verified_seed.as_str()
+        )
+    })?;
+
+    println!(
+        "Surface mapping complete for {}: {} endpoints discovered ({} in-scope, {} out-of-scope discarded)",
+        result.seed_url,
+        result.total_discovered,
+        result.in_scope_count,
+        result.out_of_scope_discarded
+    );
+
+    for endpoint in &result.endpoints {
+        let status_desc = match endpoint.status_code {
+            Some(code) => format!("HTTP {code}"),
+            None => "unprobed".to_string(),
+        };
+        println!(
+            "  [{}] {} ({})",
+            endpoint.discovered_via, endpoint.url, status_desc
+        );
+    }
 
     Ok(())
 }

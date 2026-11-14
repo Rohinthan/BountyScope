@@ -23,9 +23,11 @@ The Enforcer outputs an opaque, verified token: `VerifiedScopeUrl`. Outbound HTT
 
 ### 2. Surface Mapper
 The Surface Mapper ingests authorized URLs and systematically uncovers the visible web surface through passive and non-destructive mechanisms:
-- Parsing HTML document structures for hyperlinks, scripts, and embedded metadata.
-- Extracting inline and linked JavaScript files to discover internal API routes and parameter keys.
-- Checking for standardized technical assets such as `robots.txt`, `sitemap.xml`, and exposed OpenAPI/Swagger specification documents (`/openapi.json`, `/swagger.json`, `/v3/api-docs`).
+- **HTML Link & Script Extraction:** Parses HTML document structures using standard DOM selectors (`a[href]`, `script[src]`), resolves relative paths against the seed origin, and validates candidate URLs through `ScopeEnforcer`. Out-of-scope targets (such as external CDNs or excluded paths) are discarded and accounted for in mapping metrics.
+- **JavaScript Route Extraction:** Mines candidate relative API routes (`/api/...`, `/v1/...`, `/v2/...`, `/graphql`) from external in-scope JavaScript bundles and inline `<script>` blocks using pattern matching, resolving each against the origin and validating against scope boundaries.
+- **Technical Asset & Specification Discovery:** Probes standard technical asset files (`/robots.txt`) to uncover disallowed/allowed application paths, and probes common API documentation paths (`/openapi.json`, `/swagger.json`, `/v3/api-docs`).
+- **Soft-404 Filtering:** Rejects HTML responses returning HTTP 200 on specification paths, and enforces schema verification requiring valid JSON structures with `openapi` or `swagger` root keys before classifying endpoints as `openapi_spec`.
+- **Deduplicated SQLite Persistence:** Stores all verified in-scope endpoints in the SQLite `endpoints` table using upsert logic (`ON CONFLICT(url) DO UPDATE`) to refresh verification timestamps without creating duplicate database rows.
 
 ### 3. Safe Verification Runner
 The Verification Runner evaluates security policies and configuration baselines against mapped surface elements:
@@ -82,7 +84,8 @@ The outbound HTTP dispatcher enforces strict security invariants at the transpor
 1. **Compile-Time Target Verification:** `ScopedHttpClient::get(&self, target: &VerifiedScopeUrl)` strictly accepts verified tokens. Raw string or untrusted URL invocations fail compilation.
 2. **Prohibition of Automatic Redirects:** Configured with `reqwest::redirect::Policy::none()`. If a remote host responds with an HTTP 301, 302, 307, or 308 redirect, the client captures the `Location` header in `HttpProbeResponse::redirect_location` without following it. Callers must pass any redirect target back through the `ScopeEnforcer` before dispatching a subsequent probe, preventing redirect-based scope escapes.
 3. **Deterministic Inter-Request Rate Limiting:** Enforces minimum inter-request spacing derived from `rate_limit_rps` (e.g., 2 rps = 500 ms minimum interval) across concurrent tasks using internal mutex scheduling.
-4. **Mandatory Audit Trail:** Every outbound request attempts and completions are logged synchronously into the SQLite `audit_logs` table.
+4. **Response Payload Size Ceiling:** Implements a strict 5 MiB (`5 * 1024 * 1024` bytes) maximum response body limit via chunked stream monitoring. Responses exceeding this threshold return `HttpError::PayloadTooLarge` while recording an audit log entry, preventing unbounded memory allocation.
+5. **Mandatory Audit Trail:** Every outbound request attempt and completion is logged synchronously into the SQLite `audit_logs` table.
 
 ---
 

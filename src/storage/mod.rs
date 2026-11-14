@@ -29,6 +29,37 @@ pub struct AuditLogRecord {
     pub timestamp: String,
 }
 
+/// Represents an endpoint entry to be persisted or updated in storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointEntry {
+    pub program_id: String,
+    pub url: String,
+    pub host: String,
+    pub path: String,
+    pub method: String,
+    pub discovered_via: String,
+    pub status_code: Option<u16>,
+    pub response_size: Option<usize>,
+    pub content_type: Option<String>,
+}
+
+/// Represents a persisted endpoint record retrieved from storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointRecord {
+    pub id: String,
+    pub program_id: String,
+    pub url: String,
+    pub host: String,
+    pub path: String,
+    pub method: String,
+    pub discovered_via: String,
+    pub status_code: Option<u16>,
+    pub response_size: Option<usize>,
+    pub content_type: Option<String>,
+    pub created_at: String,
+    pub last_verified_at: Option<String>,
+}
+
 /// Thread-safe SQLite storage engine managing assessment data and audit trails.
 #[derive(Clone)]
 pub struct StorageEngine {
@@ -257,6 +288,91 @@ impl StorageEngine {
 
         Ok(records)
     }
+
+    /// Upserts an endpoint entry into storage.
+    ///
+    /// If an endpoint with the same URL already exists, its status code, response size,
+    /// content type, and last_verified_at timestamp are refreshed.
+    /// Returns the endpoint ID.
+    pub fn upsert_endpoint(&self, entry: &EndpointEntry) -> Result<String, StorageError> {
+        let conn = self.conn.lock().map_err(|_| StorageError::LockFailure)?;
+        let id = Uuid::new_v4().to_string();
+
+        let endpoint_id: String = conn.query_row(
+            r#"
+            INSERT INTO endpoints (
+                id, program_id, url, host, path, method, discovered_via,
+                status_code, response_size, content_type, last_verified_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, CURRENT_TIMESTAMP)
+            ON CONFLICT(url) DO UPDATE SET
+                status_code = excluded.status_code,
+                response_size = excluded.response_size,
+                content_type = excluded.content_type,
+                last_verified_at = CURRENT_TIMESTAMP
+            RETURNING id
+            "#,
+            params![
+                &id,
+                &entry.program_id,
+                &entry.url,
+                &entry.host,
+                &entry.path,
+                &entry.method,
+                &entry.discovered_via,
+                entry.status_code.map(|s| s as i32),
+                entry.response_size.map(|s| s as i64),
+                &entry.content_type,
+            ],
+            |row| row.get(0),
+        )?;
+
+        Ok(endpoint_id)
+    }
+
+    /// Queries all discovered endpoints for a given program ID.
+    pub fn get_endpoints_for_program(
+        &self,
+        program_id: &str,
+    ) -> Result<Vec<EndpointRecord>, StorageError> {
+        let conn = self.conn.lock().map_err(|_| StorageError::LockFailure)?;
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, program_id, url, host, path, method, discovered_via,
+                   status_code, response_size, content_type, created_at, last_verified_at
+            FROM endpoints
+            WHERE program_id = ?1
+            ORDER BY created_at ASC
+            "#,
+        )?;
+
+        let rows = stmt.query_map(params![program_id], |row| {
+            let status: Option<i32> = row.get(7)?;
+            let size: Option<i64> = row.get(8)?;
+            Ok(EndpointRecord {
+                id: row.get(0)?,
+                program_id: row.get(1)?,
+                url: row.get(2)?,
+                host: row.get(3)?,
+                path: row.get(4)?,
+                method: row.get(5)?,
+                discovered_via: row.get(6)?,
+                status_code: status.map(|s| s as u16),
+                response_size: size.map(|s| s as usize),
+                content_type: row.get(9)?,
+                created_at: row.get(10)?,
+                last_verified_at: row.get(11)?,
+            })
+        })?;
+
+        let mut endpoints = Vec::new();
+        for r in rows {
+            endpoints.push(r?);
+        }
+
+        Ok(endpoints)
+    }
 }
 
 #[cfg(test)]
@@ -361,5 +477,57 @@ mod tests {
         assert_eq!(logs[0].status_code, Some(200));
         assert_eq!(logs[0].duration_ms, 120);
         assert!(!logs[0].rate_limited);
+    }
+
+    #[test]
+    fn test_endpoint_upsert_and_conflict_update() {
+        let storage = StorageEngine::open_in_memory().expect("failed to open storage");
+        let config = sample_config();
+        let program_id = storage
+            .upsert_program_scope(&config)
+            .expect("upsert failed");
+
+        let entry = EndpointEntry {
+            program_id: program_id.clone(),
+            url: "https://example.com/api/v1/users".to_string(),
+            host: "example.com".to_string(),
+            path: "/api/v1/users".to_string(),
+            method: "GET".to_string(),
+            discovered_via: "html_link".to_string(),
+            status_code: Some(200),
+            response_size: Some(1024),
+            content_type: Some("application/json".to_string()),
+        };
+
+        let ep_id1 = storage
+            .upsert_endpoint(&entry)
+            .expect("upsert endpoint failed");
+        assert!(!ep_id1.is_empty());
+
+        let endpoints = storage
+            .get_endpoints_for_program(&program_id)
+            .expect("query endpoints failed");
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].url, "https://example.com/api/v1/users");
+        assert_eq!(endpoints[0].status_code, Some(200));
+        assert_eq!(endpoints[0].response_size, Some(1024));
+
+        // Re-upsert same URL with updated status code and response size
+        let mut updated_entry = entry.clone();
+        updated_entry.status_code = Some(403);
+        updated_entry.response_size = Some(512);
+        updated_entry.discovered_via = "re-scan".to_string();
+
+        let ep_id2 = storage
+            .upsert_endpoint(&updated_entry)
+            .expect("second upsert endpoint failed");
+        assert_eq!(ep_id1, ep_id2);
+
+        let endpoints_updated = storage
+            .get_endpoints_for_program(&program_id)
+            .expect("query endpoints failed");
+        assert_eq!(endpoints_updated.len(), 1);
+        assert_eq!(endpoints_updated[0].status_code, Some(403));
+        assert_eq!(endpoints_updated[0].response_size, Some(512));
     }
 }

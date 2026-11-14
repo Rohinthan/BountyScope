@@ -1,11 +1,14 @@
 use crate::error::HttpError;
 use crate::scope::VerifiedScopeUrl;
 use crate::storage::{AuditLogEntry, StorageEngine};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
+
+/// Maximum allowable HTTP response body size in bytes (5 MiB).
+pub const MAX_RESPONSE_BODY_BYTES: usize = 5 * 1024 * 1024;
 
 /// Structured response container for safe HTTP probes.
 #[derive(Debug, Clone)]
@@ -111,7 +114,7 @@ impl ScopedHttpClient {
         let duration_ms = start_time.elapsed().as_millis() as u64;
 
         match request_result {
-            Ok(resp) => {
+            Ok(mut resp) => {
                 let status_code = resp.status().as_u16();
 
                 // Capture redirect location header if present (301, 302, 307, 308)
@@ -127,9 +130,48 @@ impl ScopedHttpClient {
                     }
                 }
 
-                let body = resp.bytes().await.map_err(|e| {
-                    HttpError::Network(format!("failed to read response body: {e}"))
-                })?;
+                // Enforce maximum payload size limit on Content-Length header if available
+                if let Some(content_length) = resp.content_length() {
+                    if content_length > MAX_RESPONSE_BODY_BYTES as u64 {
+                        let audit_entry = AuditLogEntry {
+                            program_id: self.program_id.clone(),
+                            target_url: target.as_str().to_string(),
+                            http_method: "GET".to_string(),
+                            status_code: Some(status_code),
+                            duration_ms,
+                            rate_limited: was_rate_limited,
+                        };
+                        self.storage.record_audit_log(&audit_entry)?;
+                        return Err(HttpError::PayloadTooLarge(
+                            content_length as usize,
+                            MAX_RESPONSE_BODY_BYTES,
+                        ));
+                    }
+                }
+
+                // Stream response body chunks while enforcing maximum payload size limit
+                let mut body_buf = BytesMut::new();
+                while let Some(chunk) = resp.chunk().await.map_err(|e| {
+                    HttpError::Network(format!("failed to read response chunk: {e}"))
+                })? {
+                    if body_buf.len() + chunk.len() > MAX_RESPONSE_BODY_BYTES {
+                        let audit_entry = AuditLogEntry {
+                            program_id: self.program_id.clone(),
+                            target_url: target.as_str().to_string(),
+                            http_method: "GET".to_string(),
+                            status_code: Some(status_code),
+                            duration_ms,
+                            rate_limited: was_rate_limited,
+                        };
+                        self.storage.record_audit_log(&audit_entry)?;
+                        return Err(HttpError::PayloadTooLarge(
+                            body_buf.len() + chunk.len(),
+                            MAX_RESPONSE_BODY_BYTES,
+                        ));
+                    }
+                    body_buf.extend_from_slice(&chunk);
+                }
+                let body = body_buf.freeze();
 
                 // Persist outbound request metadata in the audit log
                 let audit_entry = AuditLogEntry {
@@ -272,5 +314,51 @@ mod tests {
         assert_eq!(logs.len(), 2);
         assert!(logs.iter().any(|l| l.rate_limited));
         assert!(logs.iter().any(|l| !l.rate_limited));
+    }
+
+    #[tokio::test]
+    async fn test_payload_too_large_rejection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind failed");
+        let addr = listener.local_addr().expect("local_addr failed");
+        let port = addr.port();
+
+        // Server advertises Content-Length exceeding MAX_RESPONSE_BODY_BYTES
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let oversized = (MAX_RESPONSE_BODY_BYTES + 1024).to_string();
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {oversized}\r\n\r\n");
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let storage = StorageEngine::open_in_memory().expect("storage open failed");
+        let config = test_scope_config(port);
+        let program_id = storage
+            .upsert_program_scope(&config)
+            .expect("upsert failed");
+        let enforcer = ScopeEnforcer::new(config).expect("enforcer failed");
+
+        let client =
+            ScopedHttpClient::new(storage.clone(), program_id.clone(), 10).expect("client failed");
+        let target_url = format!("http://127.0.0.1:{}/oversized", port);
+        let verified = enforcer
+            .validate_url(&target_url)
+            .expect("validation failed");
+
+        let result = client.get(&verified).await;
+        match result {
+            Err(HttpError::PayloadTooLarge(size, limit)) => {
+                assert_eq!(size, MAX_RESPONSE_BODY_BYTES + 1024);
+                assert_eq!(limit, MAX_RESPONSE_BODY_BYTES);
+            }
+            other => panic!("expected PayloadTooLarge error, got {:?}", other),
+        }
+
+        // Verify audit log entry was still recorded
+        let logs = storage.get_audit_logs(&program_id).expect("logs failed");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].status_code, Some(200));
     }
 }
