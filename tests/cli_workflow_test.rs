@@ -1,0 +1,259 @@
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use tempfile::tempdir;
+
+struct MockServer {
+    port: u16,
+    running: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl MockServer {
+    fn start<F>(handler: F) -> Self
+    where
+        F: Fn(&str) -> Option<&'static str> + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener failed");
+        let port = listener.local_addr().expect("local addr failed").port();
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = running.clone();
+
+        let handle = thread::spawn(move || {
+            while running_clone.load(Ordering::Relaxed) {
+                if let Ok((mut socket, _)) = listener.accept() {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).unwrap_or(0);
+                    if n > 0 {
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        if let Some(resp) = handler(&req) {
+                            let _ = socket.write_all(resp.as_bytes());
+                            let _ = socket.flush();
+                        }
+                    }
+                }
+            }
+        });
+
+        Self {
+            port,
+            running,
+            handle: Some(handle),
+        }
+    }
+
+    fn port(&self) -> u16 {
+        self.port
+    }
+}
+
+impl Drop for MockServer {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        let _ = TcpStream::connect(format!("127.0.0.1:{}", self.port));
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+#[test]
+fn test_unified_scan_workflow_and_defaults() {
+    let server = MockServer::start(|req| {
+        let resp = if req.contains("GET / ") {
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 95\r\n\r\n<html><body><a href=\"/dashboard\">Dashboard</a><script src=\"/static/app.js\"></script></body></html>"
+        } else if req.contains("GET /static/app.js ") {
+            "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nContent-Length: 35\r\n\r\nconst route = \"/api/v1/telemetry\";"
+        } else if req.contains("GET /robots.txt ") {
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 26\r\n\r\nUser-agent: *\nDisallow: /admin\n"
+        } else if req.contains("GET /openapi.json ") {
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 70\r\n\r\n{\"openapi\":\"3.0.0\",\"info\":{\"title\":\"Test API\",\"version\":\"1.0.0\"},\"paths\":{}}"
+        } else if req.contains("GET /dashboard ") {
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 22\r\n\r\n<h1>Dashboard Area</h1>"
+        } else if req.contains("GET /api/v1/telemetry ") {
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 17\r\n\r\n{\"status\":\"live\"}"
+        } else if req.contains("GET /admin ") {
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 16\r\n\r\n<h1>Admin UI</h1>"
+        } else {
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+        };
+        Some(resp)
+    });
+    let port = server.port();
+
+    let temp = tempdir().expect("tempdir failed");
+    let config_path = temp.path().join("scope.yaml");
+    let config_yaml = format!(
+        r#"program_name: "cli-unified-test"
+platform: "local"
+allowed_domains:
+  - "127.0.0.1"
+excluded_domains: []
+excluded_paths:
+  - "/excluded-path"
+rate_limit_rps: 50
+safe_mode: true
+researcher_handle: "cli-tester"
+policy_url: "http://127.0.0.1:{}/policy"
+excluded_checks: []
+"#,
+        port
+    );
+    std::fs::write(&config_path, config_yaml).expect("write scope.yaml failed");
+
+    let bin_path = env!("CARGO_BIN_EXE_bountyscope");
+    let seed_url = format!("http://127.0.0.1:{}/", port);
+
+    // 1. Run unified scan relying on default database and default report output
+    let output = Command::new(bin_path)
+        .arg("scan")
+        .arg("--url")
+        .arg(&seed_url)
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .expect("bountyscope scan execution failed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "bountyscope scan failed: stderr: {}",
+        stderr
+    );
+    assert!(stdout.contains("Target scope initialized for program 'cli-unified-test'"));
+    assert!(stdout.contains("Starting passive surface mapping"));
+    assert!(stdout.contains("Surface mapping complete:"));
+    assert!(stdout.contains("Starting non-destructive security verification"));
+    assert!(stdout.contains("Audit completed:"));
+    assert!(stdout.contains("Assessment report generated successfully:"));
+
+    // Verify default database and default Markdown report exist
+    let default_db = PathBuf::from("data/cli_unified_test.db");
+    let default_report = PathBuf::from("data/cli_unified_test_report.md");
+
+    assert!(
+        default_db.exists(),
+        "Default database file {:?} should exist",
+        default_db
+    );
+    assert!(
+        default_report.exists(),
+        "Default report file {:?} should exist",
+        default_report
+    );
+
+    let report_content =
+        std::fs::read_to_string(&default_report).expect("read default report failed");
+    assert!(report_content.contains("# Security Assessment Report: cli-unified-test"));
+    assert!(report_content.contains("cli-tester"));
+
+    // Cleanup generated default files
+    let _ = std::fs::remove_file(&default_db);
+    let _ = std::fs::remove_file(&default_report);
+}
+
+#[test]
+fn test_env_var_fallback_and_custom_paths() {
+    let server = MockServer::start(|_req| {
+        Some("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 17\r\n\r\n{\"status\":\"live\"}")
+    });
+    let port = server.port();
+
+    let temp = tempdir().expect("tempdir failed");
+    let config_path = temp.path().join("custom_scope.yaml");
+    let config_yaml = r#"program_name: "custom-env-test"
+platform: "local"
+allowed_domains:
+  - "127.0.0.1"
+excluded_domains: []
+excluded_paths: []
+rate_limit_rps: 50
+safe_mode: true
+"#;
+    std::fs::write(&config_path, config_yaml).expect("write scope failed");
+
+    let custom_db = temp.path().join("custom_dir").join("audit.db");
+    let custom_report = temp.path().join("custom_dir").join("assessment.md");
+
+    let bin_path = env!("CARGO_BIN_EXE_bountyscope");
+    let seed_url = format!("http://127.0.0.1:{}/", port);
+
+    // Run without --config flag, relying on BOUNTYSCOPE_CONFIG env var
+    let output = Command::new(bin_path)
+        .env("BOUNTYSCOPE_CONFIG", &config_path)
+        .arg("scan")
+        .arg("--url")
+        .arg(&seed_url)
+        .arg("--db")
+        .arg(&custom_db)
+        .arg("--output")
+        .arg(&custom_report)
+        .output()
+        .expect("execution failed");
+
+    assert!(
+        output.status.success(),
+        "Command failed with stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        custom_db.exists(),
+        "Custom database {:?} should be created",
+        custom_db
+    );
+    assert!(
+        custom_report.exists(),
+        "Custom report {:?} should be created",
+        custom_report
+    );
+
+    let report_text = std::fs::read_to_string(&custom_report).expect("read report failed");
+    assert!(report_text.contains("# Security Assessment Report: custom-env-test"));
+}
+
+#[test]
+fn test_unauthorized_seed_url_fails_closed() {
+    let temp = tempdir().expect("tempdir failed");
+    let config_path = temp.path().join("scope.yaml");
+    let config_yaml = r#"program_name: "strict-scope-test"
+platform: "local"
+allowed_domains:
+  - "127.0.0.1"
+excluded_domains: []
+excluded_paths: []
+rate_limit_rps: 50
+safe_mode: true
+"#;
+    std::fs::write(&config_path, config_yaml).expect("write scope failed");
+
+    let bin_path = env!("CARGO_BIN_EXE_bountyscope");
+
+    // Attempt scan against an out-of-scope domain
+    let output = Command::new(bin_path)
+        .arg("scan")
+        .arg("--url")
+        .arg("https://unauthorized.target.invalid/")
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .expect("execution failed");
+
+    assert!(
+        !output.status.success(),
+        "Out-of-scope URL must fail closed immediately"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not within authorized scope") || stderr.contains("DisallowedDomain"),
+        "stderr should describe scope rejection: {}",
+        stderr
+    );
+}

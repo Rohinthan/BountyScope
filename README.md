@@ -65,8 +65,11 @@ cd BountyScope
 # Build release binary
 cargo build --release
 
-# The compiled binary is available at target/release/bountyscope
-./target/release/bountyscope --version
+# Install globally to ~/.cargo/bin
+cargo install --path .
+
+# The binary is available on PATH as bountyscope
+bountyscope --version
 ```
 
 ### Quality and Verification Checks
@@ -137,18 +140,66 @@ policy_url: "https://hackerone.com/example-security-program"
 
 ## CLI Command Reference
 
-BountyScope provides a suite of subcommands for validation, passive mapping, verification, reporting, and MCP integration:
+BountyScope provides a suite of subcommands for validation, passive mapping, verification, reporting, and MCP integration.
+
+### Environment Variable Fallback (`BOUNTYSCOPE_CONFIG`)
+
+All subcommands accept the `BOUNTYSCOPE_CONFIG` environment variable as a fallback for the `--config` parameter:
+
+```bash
+export BOUNTYSCOPE_CONFIG="configs/scope.example.yaml"
+```
+
+When set, the `--config` flag can be omitted from any command invocation.
+
+### Automatic Database and Report Path Derivation
+
+The `--db` parameter is optional across all commands. When omitted, BountyScope automatically derives a deterministic database path at `data/<sanitized_program_name>.db` and creates parent directories automatically.
+
+Similarly, `--output` on `report` and `scan` defaults to `data/<sanitized_program_name>_report.md`. To print reports directly to standard output, pass the `--stdout` flag to `report`.
+
+### Command Matrix
 
 | Command | Purpose | Input Flags | Output |
 |---|---|---|---|
-| `validate-scope` | Verifies YAML syntax and scope boundary integrity. | `--config` | Console validation summary |
-| `probe` | Safely evaluates and probes a single in-scope URL. | `--config`, `--url`, `--db` | HTTP status, headers, audit log entry |
-| `map` | Passively extracts links, scripts, and API specs from a seed URL. | `--config`, `--url`, `--db` | Discovered endpoints in SQLite |
-| `audit` | Evaluates HTTP headers, CORS policies, and spec disclosures. | `--config`, `--db` | Audit findings summary |
-| `report` | Generates a Markdown assessment report with findings and evidence. | `--config`, `--db`, `[--output]` | Markdown report (stdout or file) |
-| `mcp` | Launches the Model Context Protocol server over standard I/O (`stdio`). | `--config`, `--db` | JSON-RPC 2.0 protocol on stdout |
+| `validate-scope` | Verifies YAML syntax and scope boundary integrity. | `[--config]` | Console validation summary |
+| `scan` | Unified pipeline: maps surface, audits endpoints, and exports report. | `--url`, `[--config]`, `[--db]`, `[--output]` | SQLite database and Markdown report |
+| `probe` | Safely evaluates and probes a single in-scope URL. | `--url`, `[--config]`, `[--db]` | HTTP status, headers, audit log entry |
+| `map` | Passively extracts links, scripts, and API specs from a seed URL. | `--url`, `[--config]`, `[--db]` | Discovered endpoints in SQLite |
+| `audit` | Evaluates HTTP headers, CORS policies, and spec disclosures. | `[--config]`, `[--db]` | Audit findings summary |
+| `report` | Generates a Markdown assessment report with findings and evidence. | `[--config]`, `[--db]`, `[--output]`, `[--stdout]` | Markdown report (file or stdout) |
+| `mcp` | Launches the Model Context Protocol server over standard I/O (`stdio`). | `[--config]`, `[--db]` | JSON-RPC 2.0 protocol on stdout |
 
-### 1. Validate Scope Configuration
+### 1. Unified Assessment Scan (`bountyscope scan`)
+
+Execute surface mapping, passive policy verification, and Markdown report export in a single command:
+
+```bash
+# Unified scan with explicit configuration
+bountyscope scan --url http://127.0.0.1:8080/ --config configs/scope.example.yaml
+
+# Unified scan using BOUNTYSCOPE_CONFIG and automatic path derivation
+export BOUNTYSCOPE_CONFIG=configs/scope.example.yaml
+bountyscope scan --url http://127.0.0.1:8080/
+```
+
+Sample output:
+```text
+Target scope initialized for program 'example-security-program'
+Database: "data/example_security_program.db"
+Starting passive surface mapping from http://127.0.0.1:8080/...
+Surface mapping complete: 14 endpoints discovered (9 in-scope, 5 out-of-scope discarded)
+Starting non-destructive security verification...
+Audit completed: 9 endpoints audited, 6 total findings
+  CRITICAL: 0
+  HIGH:     1
+  MEDIUM:   1
+  LOW:      3
+  INFO:     1
+Assessment report generated successfully: "data/example_security_program_report.md"
+```
+
+### 2. Validate Scope Configuration
 
 ```bash
 bountyscope validate-scope --config configs/scope.example.yaml
@@ -159,10 +210,11 @@ Sample output:
 Scope configuration valid: example-security-program (platform: hackerone, allowed_domains: 3, excluded_domains: 3, excluded_paths: 4, rate_limit_rps: 2, safe_mode: true)
 ```
 
-### 2. Safely Probe Target Endpoint
+### 3. Safely Probe Target Endpoint
 
 ```bash
-bountyscope probe --config configs/scope.example.yaml --url http://127.0.0.1:8080/openapi.json --db data/bountyscope.db
+# Database automatically defaults to data/example_security_program.db
+bountyscope probe --config configs/scope.example.yaml --url http://127.0.0.1:8080/openapi.json
 ```
 
 Sample output:
@@ -170,10 +222,10 @@ Sample output:
 Probe successful: http://127.0.0.1:8080/openapi.json -> HTTP 200 (application/json, 538 bytes, 3 ms)
 ```
 
-### 3. Passively Map Attack Surface
+### 4. Passively Map Attack Surface
 
 ```bash
-bountyscope map --config configs/scope.example.yaml --url http://127.0.0.1:8080/ --db data/bountyscope.db
+bountyscope map --config configs/scope.example.yaml --url http://127.0.0.1:8080/
 ```
 
 Sample output:
@@ -190,10 +242,10 @@ Surface mapping complete for http://127.0.0.1:8080/: 14 endpoints discovered (9 
   [openapi_spec] http://127.0.0.1:8080/openapi.json (HTTP 200)
 ```
 
-### 4. Audit Mapped Endpoints
+### 5. Audit Mapped Endpoints
 
 ```bash
-bountyscope audit --config configs/scope.example.yaml --db data/bountyscope.db
+bountyscope audit --config configs/scope.example.yaml
 ```
 
 Sample output:
@@ -206,20 +258,20 @@ Audit completed for program 'example-security-program': 9 endpoints audited, 6 t
   INFO:     1
 ```
 
-### 5. Generate Assessment Markdown Report
+### 6. Generate Assessment Markdown Report
 
 ```bash
-# Export to a file
-bountyscope report --config configs/scope.example.yaml --db data/bountyscope.db --output report.md
+# Output defaults to data/example_security_program_report.md
+bountyscope report --config configs/scope.example.yaml
 
-# Print directly to standard output
-bountyscope report --config configs/scope.example.yaml --db data/bountyscope.db
+# Or print directly to standard output
+bountyscope report --config configs/scope.example.yaml --stdout
 ```
 
-### 6. Serve Model Context Protocol (MCP)
+### 7. Serve Model Context Protocol (MCP)
 
 ```bash
-bountyscope mcp --config configs/scope.example.yaml --db data/bountyscope.db
+bountyscope mcp --config configs/scope.example.yaml
 ```
 
 ---

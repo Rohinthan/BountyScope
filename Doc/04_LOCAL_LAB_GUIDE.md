@@ -77,6 +77,47 @@ Validate the scope configuration with the BountyScope CLI:
 bountyscope validate-scope --config configs/scope.local.yaml
 ```
 
+## Running Assessments Against the Local Lab
+
+### Unified Single-Command Assessment
+
+Execute surface mapping, passive policy verification, and Markdown report generation in a single unified command:
+
+```bash
+bountyscope scan --config configs/scope.local.yaml --url http://127.0.0.1:8080/
+```
+
+By default, this automatically creates:
+- SQLite assessment database at `data/local_lab_verification.db`
+- Formatted Markdown report at `data/local_lab_verification_report.md`
+
+You can also leverage the `BOUNTYSCOPE_CONFIG` environment variable:
+
+```bash
+export BOUNTYSCOPE_CONFIG=configs/scope.local.yaml
+bountyscope scan --url http://127.0.0.1:8080/
+```
+
+### Granular Subcommand Pipeline
+
+Alternatively, execute assessment stages individually:
+
+```bash
+# 1. Probe a specific endpoint
+bountyscope probe --config configs/scope.local.yaml --url http://127.0.0.1:8080/openapi.json
+
+# 2. Passively map endpoints starting from the seed URL
+bountyscope map --config configs/scope.local.yaml --url http://127.0.0.1:8080/
+
+# 3. Audit all discovered endpoints for security configuration issues
+bountyscope audit --config configs/scope.local.yaml
+
+# 4. Generate the Markdown assessment report
+bountyscope report --config configs/scope.local.yaml
+```
+
+Note: When `--db` is omitted, BountyScope defaults to `data/<sanitized_program_name>.db` and creates parent directories automatically.
+
 ## Stopping and Cleaning Up the Lab
 
 When testing is complete, tear down the containers:

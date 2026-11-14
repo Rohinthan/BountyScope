@@ -27,75 +27,133 @@ enum Commands {
     /// Validate target scope boundaries and configuration syntax
     ValidateScope {
         /// Path to scope configuration YAML file
-        #[arg(short, long, default_value = "configs/scope.example.yaml")]
+        #[arg(
+            short,
+            long,
+            env = "BOUNTYSCOPE_CONFIG",
+            default_value = "configs/scope.example.yaml"
+        )]
         config: PathBuf,
+    },
+
+    /// Execute unified end-to-end passive scan: mapping, verification, and report generation
+    Scan {
+        /// Target seed URL to initiate mapping and verification
+        #[arg(short, long)]
+        url: String,
+
+        /// Path to scope configuration YAML file
+        #[arg(
+            short,
+            long,
+            env = "BOUNTYSCOPE_CONFIG",
+            default_value = "configs/scope.example.yaml"
+        )]
+        config: PathBuf,
+
+        /// Path to local SQLite database file (defaults to data/<program_name>.db)
+        #[arg(short, long)]
+        db: Option<PathBuf>,
+
+        /// Output file path for Markdown report (defaults to data/<program_name>_report.md)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
     },
 
     /// Safely probe an in-scope URL, enforcing rate limits and recording audit logs
     Probe {
         /// Path to scope configuration YAML file
-        #[arg(short, long, default_value = "configs/scope.example.yaml")]
+        #[arg(
+            short,
+            long,
+            env = "BOUNTYSCOPE_CONFIG",
+            default_value = "configs/scope.example.yaml"
+        )]
         config: PathBuf,
 
         /// Target URL to probe
         #[arg(short, long)]
         url: String,
 
-        /// Path to local SQLite database file
-        #[arg(short, long, default_value = "data/bountyscope.db")]
-        db: PathBuf,
+        /// Path to local SQLite database file (defaults to data/<program_name>.db)
+        #[arg(short, long)]
+        db: Option<PathBuf>,
     },
 
     /// Passively map the attack surface starting from an in-scope seed URL
     Map {
         /// Path to scope configuration YAML file
-        #[arg(short, long, default_value = "configs/scope.example.yaml")]
+        #[arg(
+            short,
+            long,
+            env = "BOUNTYSCOPE_CONFIG",
+            default_value = "configs/scope.example.yaml"
+        )]
         config: PathBuf,
 
         /// Seed URL to initiate passive surface mapping
         #[arg(short, long)]
         url: String,
 
-        /// Path to local SQLite database file
-        #[arg(short, long, default_value = "data/bountyscope.db")]
-        db: PathBuf,
+        /// Path to local SQLite database file (defaults to data/<program_name>.db)
+        #[arg(short, long)]
+        db: Option<PathBuf>,
     },
 
     /// Run non-destructive verification audits across mapped endpoints
     Audit {
         /// Path to scope configuration YAML file
-        #[arg(short, long, default_value = "configs/scope.example.yaml")]
+        #[arg(
+            short,
+            long,
+            env = "BOUNTYSCOPE_CONFIG",
+            default_value = "configs/scope.example.yaml"
+        )]
         config: PathBuf,
 
-        /// Path to local SQLite database file
-        #[arg(short, long, default_value = "data/bountyscope.db")]
-        db: PathBuf,
+        /// Path to local SQLite database file (defaults to data/<program_name>.db)
+        #[arg(short, long)]
+        db: Option<PathBuf>,
     },
 
     /// Generate an assessment Markdown report from stored audit findings
     Report {
         /// Path to scope configuration YAML file
-        #[arg(short, long, default_value = "configs/scope.example.yaml")]
+        #[arg(
+            short,
+            long,
+            env = "BOUNTYSCOPE_CONFIG",
+            default_value = "configs/scope.example.yaml"
+        )]
         config: PathBuf,
 
-        /// Path to local SQLite database file
-        #[arg(short, long, default_value = "data/bountyscope.db")]
-        db: PathBuf,
+        /// Path to local SQLite database file (defaults to data/<program_name>.db)
+        #[arg(short, long)]
+        db: Option<PathBuf>,
 
-        /// Optional output file path for Markdown report (prints to stdout if omitted)
+        /// Output file path for Markdown report (defaults to data/<program_name>_report.md unless --stdout is set)
         #[arg(short, long)]
         output: Option<PathBuf>,
+
+        /// Print report directly to standard output
+        #[arg(long, default_value_t = false)]
+        stdout: bool,
     },
 
     /// Serve native Model Context Protocol (MCP) server over stdio
     Mcp {
         /// Path to scope configuration YAML file
-        #[arg(short, long, default_value = "configs/scope.example.yaml")]
+        #[arg(
+            short,
+            long,
+            env = "BOUNTYSCOPE_CONFIG",
+            default_value = "configs/scope.example.yaml"
+        )]
         config: PathBuf,
 
-        /// Path to local SQLite database file
-        #[arg(short, long, default_value = "data/bountyscope.db")]
-        db: PathBuf,
+        /// Path to local SQLite database file (defaults to data/<program_name>.db)
+        #[arg(short, long)]
+        db: Option<PathBuf>,
     },
 }
 
@@ -113,10 +171,21 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::ValidateScope { config }) => execute_validate_scope(&config),
+        Some(Commands::Scan {
+            url,
+            config,
+            db,
+            output,
+        }) => execute_scan(&config, &url, &db, &output).await,
         Some(Commands::Probe { config, url, db }) => execute_probe(&config, &url, &db).await,
         Some(Commands::Map { config, url, db }) => execute_map(&config, &url, &db).await,
         Some(Commands::Audit { config, db }) => execute_audit(&config, &db).await,
-        Some(Commands::Report { config, db, output }) => execute_report(&config, &db, &output),
+        Some(Commands::Report {
+            config,
+            db,
+            output,
+            stdout,
+        }) => execute_report(&config, &db, &output, stdout),
         Some(Commands::Mcp { config, db }) => execute_mcp(&config, &db).await,
         None => {
             println!("BountyScope v0.14.0 - Vulnerability Surface Mapping Engine");
@@ -124,6 +193,59 @@ async fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn sanitize_name(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    if sanitized.is_empty() {
+        "bountyscope".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn resolve_db_path(db_arg: &Option<PathBuf>, program_name: &str) -> Result<PathBuf> {
+    let db_path = match db_arg {
+        Some(p) => p.clone(),
+        None => {
+            let sanitized = sanitize_name(program_name);
+            PathBuf::from(format!("data/{sanitized}.db"))
+        }
+    };
+    if let Some(parent) = db_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create database directory {:?}", parent))?;
+        }
+    }
+    Ok(db_path)
+}
+
+fn resolve_report_output_path(
+    output_arg: &Option<PathBuf>,
+    program_name: &str,
+    stdout: bool,
+) -> Result<Option<PathBuf>> {
+    if stdout {
+        return Ok(None);
+    }
+    let path = match output_arg {
+        Some(p) => p.clone(),
+        None => {
+            let sanitized = sanitize_name(program_name);
+            PathBuf::from(format!("data/{sanitized}_report.md"))
+        }
+    };
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create report directory {:?}", parent))?;
+        }
+    }
+    Ok(Some(path))
 }
 
 fn execute_validate_scope(config_path: &PathBuf) -> Result<()> {
@@ -148,7 +270,107 @@ fn execute_validate_scope(config_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn execute_probe(config_path: &PathBuf, url_str: &str, db_path: &PathBuf) -> Result<()> {
+async fn execute_scan(
+    config_path: &PathBuf,
+    url_str: &str,
+    db_arg: &Option<PathBuf>,
+    output_arg: &Option<PathBuf>,
+) -> Result<()> {
+    let config = ScopeConfig::from_file(config_path)
+        .with_context(|| format!("Failed to load scope configuration from {:?}", config_path))?;
+
+    let enforcer = ScopeEnforcer::new(config.clone())
+        .with_context(|| "Scope configuration failed validation rules")?;
+
+    let verified_seed = enforcer
+        .validate_url(url_str)
+        .with_context(|| format!("Seed URL '{url_str}' is not within authorized scope"))?;
+
+    let db_path = resolve_db_path(db_arg, &config.program_name)?;
+    let storage = StorageEngine::open(&db_path)
+        .with_context(|| format!("Failed to initialize database at {:?}", db_path))?;
+
+    let program_id = storage
+        .upsert_program_scope(&config)
+        .with_context(|| "Failed to upsert target scope in database")?;
+
+    let client = ScopedHttpClient::new(storage.clone(), program_id.clone(), config.rate_limit_rps)
+        .with_context(|| "Failed to initialize scoped HTTP client")?
+        .with_researcher_handle(config.researcher_handle.clone());
+
+    println!(
+        "Target scope initialized for program '{}'",
+        config.program_name
+    );
+    println!("Database: {:?}", db_path);
+
+    println!(
+        "Starting passive surface mapping from {}...",
+        verified_seed.as_str()
+    );
+    let mapper = SurfaceMapper::new(&enforcer, &client, &storage, program_id.clone())
+        .with_context(|| "Failed to initialize surface mapper")?;
+
+    let map_result = mapper.map(&verified_seed).await.with_context(|| {
+        format!(
+            "Surface mapping failed for seed '{}'",
+            verified_seed.as_str()
+        )
+    })?;
+
+    println!(
+        "Surface mapping complete: {} endpoints discovered ({} in-scope, {} out-of-scope discarded)",
+        map_result.total_discovered, map_result.in_scope_count, map_result.out_of_scope_discarded
+    );
+
+    println!("Starting non-destructive security verification...");
+    let runner = SafeVerificationRunner::new(&enforcer, &client, &storage, program_id.clone());
+    let audit_summary = runner
+        .run()
+        .await
+        .with_context(|| "Verification runner failed during audit execution")?;
+
+    println!(
+        "Audit completed: {} endpoints audited, {} total findings",
+        audit_summary.total_audited, audit_summary.findings_count
+    );
+    println!("  CRITICAL: {}", audit_summary.critical_count);
+    println!("  HIGH:     {}", audit_summary.high_count);
+    println!("  MEDIUM:   {}", audit_summary.medium_count);
+    println!("  LOW:      {}", audit_summary.low_count);
+    println!("  INFO:     {}", audit_summary.info_count);
+
+    let program = storage
+        .get_program_by_name(&config.program_name)
+        .with_context(|| format!("Program '{}' not found in database.", config.program_name))?;
+
+    let endpoints = storage
+        .get_endpoints_for_program(&program.id)
+        .with_context(|| "Failed to query endpoints from database")?;
+
+    let findings = storage
+        .get_findings_for_program(&program.id)
+        .with_context(|| "Failed to query findings from database")?;
+
+    let report_content =
+        ReportGenerator::generate_markdown(&program, &config, &endpoints, &findings);
+
+    let out_path = resolve_report_output_path(output_arg, &config.program_name, false)?
+        .context("Report output path resolution failed")?;
+
+    ReportGenerator::write_to_file(&report_content, &out_path)
+        .with_context(|| format!("Failed to write report to {:?}", out_path))?;
+
+    println!("Assessment report generated successfully: {:?}", out_path);
+
+    Ok(())
+}
+
+async fn execute_probe(
+    config_path: &PathBuf,
+    url_str: &str,
+    db_arg: &Option<PathBuf>,
+) -> Result<()> {
     let config = ScopeConfig::from_file(config_path)
         .with_context(|| format!("Failed to load scope configuration from {:?}", config_path))?;
 
@@ -159,7 +381,8 @@ async fn execute_probe(config_path: &PathBuf, url_str: &str, db_path: &PathBuf) 
         .validate_url(url_str)
         .with_context(|| format!("Target URL '{url_str}' is not within authorized scope"))?;
 
-    let storage = StorageEngine::open(db_path)
+    let db_path = resolve_db_path(db_arg, &config.program_name)?;
+    let storage = StorageEngine::open(&db_path)
         .with_context(|| format!("Failed to initialize database at {:?}", db_path))?;
 
     let program_id = storage
@@ -194,7 +417,7 @@ async fn execute_probe(config_path: &PathBuf, url_str: &str, db_path: &PathBuf) 
     Ok(())
 }
 
-async fn execute_map(config_path: &PathBuf, url_str: &str, db_path: &PathBuf) -> Result<()> {
+async fn execute_map(config_path: &PathBuf, url_str: &str, db_arg: &Option<PathBuf>) -> Result<()> {
     let config = ScopeConfig::from_file(config_path)
         .with_context(|| format!("Failed to load scope configuration from {:?}", config_path))?;
 
@@ -205,7 +428,8 @@ async fn execute_map(config_path: &PathBuf, url_str: &str, db_path: &PathBuf) ->
         .validate_url(url_str)
         .with_context(|| format!("Seed URL '{url_str}' is not within authorized scope"))?;
 
-    let storage = StorageEngine::open(db_path)
+    let db_path = resolve_db_path(db_arg, &config.program_name)?;
+    let storage = StorageEngine::open(&db_path)
         .with_context(|| format!("Failed to initialize database at {:?}", db_path))?;
 
     let program_id = storage
@@ -248,14 +472,15 @@ async fn execute_map(config_path: &PathBuf, url_str: &str, db_path: &PathBuf) ->
     Ok(())
 }
 
-async fn execute_audit(config_path: &PathBuf, db_path: &PathBuf) -> Result<()> {
+async fn execute_audit(config_path: &PathBuf, db_arg: &Option<PathBuf>) -> Result<()> {
     let config = ScopeConfig::from_file(config_path)
         .with_context(|| format!("Failed to load scope configuration from {:?}", config_path))?;
 
     let enforcer = ScopeEnforcer::new(config.clone())
         .with_context(|| "Scope configuration failed validation rules")?;
 
-    let storage = StorageEngine::open(db_path)
+    let db_path = resolve_db_path(db_arg, &config.program_name)?;
+    let storage = StorageEngine::open(&db_path)
         .with_context(|| format!("Failed to initialize database at {:?}", db_path))?;
 
     let program = storage
@@ -292,13 +517,15 @@ async fn execute_audit(config_path: &PathBuf, db_path: &PathBuf) -> Result<()> {
 
 fn execute_report(
     config_path: &PathBuf,
-    db_path: &PathBuf,
-    output: &Option<PathBuf>,
+    db_arg: &Option<PathBuf>,
+    output_arg: &Option<PathBuf>,
+    stdout: bool,
 ) -> Result<()> {
     let config = ScopeConfig::from_file(config_path)
         .with_context(|| format!("Failed to load scope configuration from {:?}", config_path))?;
 
-    let storage = StorageEngine::open(db_path)
+    let db_path = resolve_db_path(db_arg, &config.program_name)?;
+    let storage = StorageEngine::open(&db_path)
         .with_context(|| format!("Failed to initialize database at {:?}", db_path))?;
 
     let program = storage
@@ -316,9 +543,9 @@ fn execute_report(
     let report_content =
         ReportGenerator::generate_markdown(&program, &config, &endpoints, &findings);
 
-    match output {
+    match resolve_report_output_path(output_arg, &config.program_name, stdout)? {
         Some(out_path) => {
-            ReportGenerator::write_to_file(&report_content, out_path)
+            ReportGenerator::write_to_file(&report_content, &out_path)
                 .with_context(|| format!("Failed to write report to {:?}", out_path))?;
             println!("Report generated successfully: {:?}", out_path);
         }
@@ -330,14 +557,15 @@ fn execute_report(
     Ok(())
 }
 
-async fn execute_mcp(config_path: &PathBuf, db_path: &PathBuf) -> Result<()> {
+async fn execute_mcp(config_path: &PathBuf, db_arg: &Option<PathBuf>) -> Result<()> {
     let config = ScopeConfig::from_file(config_path)
         .with_context(|| format!("Failed to load scope configuration from {:?}", config_path))?;
 
     let enforcer = ScopeEnforcer::new(config.clone())
         .with_context(|| "Scope configuration failed validation rules")?;
 
-    let storage = StorageEngine::open(db_path)
+    let db_path = resolve_db_path(db_arg, &config.program_name)?;
+    let storage = StorageEngine::open(&db_path)
         .with_context(|| format!("Failed to initialize database at {:?}", db_path))?;
 
     let _ = storage
