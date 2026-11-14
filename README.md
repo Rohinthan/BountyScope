@@ -172,6 +172,41 @@ bountyscope report --config configs/scope.example.yaml --db data/bountyscope.db 
 bountyscope report --config configs/scope.example.yaml --db data/bountyscope.db
 ```
 
+### Model Context Protocol (MCP) Server
+
+Launch the native MCP server communicating over standard I/O (`stdio`):
+
+```bash
+bountyscope mcp --config configs/scope.example.yaml --db data/bountyscope.db
+```
+
+The server exposes four tools for AI agents and automated workflows:
+- `check_target_scope`: Validates target URLs against active scope boundaries before dispatch.
+- `list_mapped_endpoints`: Queries discovered surface endpoints stored in SQLite.
+- `list_security_findings`: Queries security findings filtered optionally by severity.
+- `generate_assessment_report`: Synthesizes an end-to-end Markdown assessment report.
+
+#### MCP Client Integration
+
+Add BountyScope to your MCP client configuration (e.g., `mcp_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "bountyscope": {
+      "command": "bountyscope",
+      "args": [
+        "mcp",
+        "--config",
+        "configs/scope.example.yaml",
+        "--db",
+        "data/bountyscope.db"
+      ]
+    }
+  }
+}
+```
+
 ---
 
 ## Local Testing Lab

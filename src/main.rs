@@ -1,11 +1,13 @@
 use anyhow::{Context, Result};
 use bountyscope::http::ScopedHttpClient;
 use bountyscope::mapper::SurfaceMapper;
+use bountyscope::mcp::BountyScopeMcpServer;
 use bountyscope::report::ReportGenerator;
 use bountyscope::scope::{ScopeConfig, ScopeEnforcer};
 use bountyscope::storage::StorageEngine;
 use bountyscope::verifier::SafeVerificationRunner;
 use clap::{Parser, Subcommand};
+use rmcp::ServiceExt;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -84,11 +86,23 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+
+    /// Serve native Model Context Protocol (MCP) server over stdio
+    Mcp {
+        /// Path to scope configuration YAML file
+        #[arg(short, long, default_value = "configs/scope.example.yaml")]
+        config: PathBuf,
+
+        /// Path to local SQLite database file
+        #[arg(short, long, default_value = "data/bountyscope.db")]
+        db: PathBuf,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
@@ -103,6 +117,7 @@ async fn main() -> Result<()> {
         Some(Commands::Map { config, url, db }) => execute_map(&config, &url, &db).await,
         Some(Commands::Audit { config, db }) => execute_audit(&config, &db).await,
         Some(Commands::Report { config, db, output }) => execute_report(&config, &db, &output),
+        Some(Commands::Mcp { config, db }) => execute_mcp(&config, &db).await,
         None => {
             println!("BountyScope v0.14.0 - Vulnerability Surface Mapping Engine");
             println!("Run 'bountyscope --help' for available commands.");
@@ -312,5 +327,40 @@ fn execute_report(
         }
     }
 
+    Ok(())
+}
+
+async fn execute_mcp(config_path: &PathBuf, db_path: &PathBuf) -> Result<()> {
+    let config = ScopeConfig::from_file(config_path)
+        .with_context(|| format!("Failed to load scope configuration from {:?}", config_path))?;
+
+    let enforcer = ScopeEnforcer::new(config.clone())
+        .with_context(|| "Scope configuration failed validation rules")?;
+
+    let storage = StorageEngine::open(db_path)
+        .with_context(|| format!("Failed to initialize database at {:?}", db_path))?;
+
+    let _ = storage
+        .upsert_program_scope(&config)
+        .with_context(|| "Failed to upsert target scope in database")?;
+
+    eprintln!(
+        "BountyScope MCP server initialized for program '{}' (database: {:?})",
+        config.program_name, db_path
+    );
+    eprintln!("Serving Model Context Protocol over stdio transport...");
+
+    let server = BountyScopeMcpServer::new(enforcer, storage);
+    let running = server
+        .serve(rmcp::transport::io::stdio())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to initialize MCP server: {e}"))?;
+
+    let _ = running
+        .waiting()
+        .await
+        .map_err(|e| anyhow::anyhow!("MCP server runtime error: {e}"))?;
+
+    eprintln!("BountyScope MCP server stopped cleanly.");
     Ok(())
 }

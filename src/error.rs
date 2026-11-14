@@ -122,3 +122,19 @@ pub enum ReportError {
     #[error("Program not found: {0}")]
     ProgramNotFound(String),
 }
+
+/// Structured errors for Model Context Protocol (MCP) server operations.
+#[derive(Debug, Error)]
+pub enum McpError {
+    #[error("Scope error during MCP operation: {0}")]
+    Scope(#[from] ScopeError),
+
+    #[error("Storage error during MCP operation: {0}")]
+    Storage(#[from] StorageError),
+
+    #[error("Report generation error during MCP operation: {0}")]
+    Report(#[from] ReportError),
+
+    #[error("MCP protocol or transport error: {0}")]
+    Protocol(String),
+}

@@ -37,10 +37,11 @@ The Verification Runner evaluates security policies and configuration baselines 
 - Verifying accessibility and authorization boundaries of published AI tool interfaces and MCP endpoints.
 
 ### 4. AI Triage & MCP Server
-The AI Triage and Model Context Protocol (MCP) server component aggregates telemetry and structured findings:
+The AI Triage and Model Context Protocol (MCP) server component aggregates telemetry, mapped endpoints, and security findings:
 - Normalizes discovered endpoints and observed findings into structured schemas.
-- Interfaces with external AI assessment tools and analyst consoles via standard MCP tools and resources.
+- Interfaces with external AI assessment tools, IDEs, and analyst consoles via standard MCP tools and resources over standard I/O (`stdio`).
 - Provides contextual scope queries, preventing external automation agents from initiating out-of-scope probes.
+- Renders comprehensive assessment Markdown reports on demand.
 
 ---
 
@@ -108,6 +109,7 @@ CREATE TABLE IF NOT EXISTS programs (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
     platform TEXT NOT NULL,
+    policy_url TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -167,3 +169,40 @@ CREATE INDEX IF NOT EXISTS idx_endpoints_host ON endpoints(host);
 CREATE INDEX IF NOT EXISTS idx_findings_program ON findings(program_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp);
 ```
+
+---
+
+## Native Model Context Protocol (MCP) Server
+
+BountyScope implements a native Model Context Protocol (MCP) server conforming to JSON-RPC 2.0 specifications via the `rmcp` library (`server` and `transport-io` features). The server bridges automated external AI agents, IDE assistants, and defensive analysts directly to BountyScope's scope validation engine and SQLite storage.
+
+### Standard I/O Transport & Stream Isolation
+
+The MCP server runs over standard input and output streams (`stdio`):
+- **`stdout` (Dedicated Protocol Stream):** Exclusively reserved for newline-delimited JSON-RPC 2.0 messages. Any non-protocol text on `stdout` violates protocol framing and causes MCP clients to disconnect.
+- **`stderr` (Diagnostic Stream):** Configured via `tracing_subscriber::fmt().with_writer(std::io::stderr)` to receive all operational logging, diagnostic events, and initialization notices.
+
+### Exposed MCP Tools
+
+The server implements `rmcp::ServerHandler` with declarative tool routing via `schemars` JSON schemas:
+
+1. **`check_target_scope`**
+   - **Input:** `{ "url": "https://..." }`
+   - **Operation:** Executes `ScopeEnforcer::validate_url()`.
+   - **Output:** `{ "allowed": bool, "normalized_url": Option<String>, "reason": Option<String> }`
+   - **Safety Guarantee:** Provides autonomous agents with an authoritative boundary check prior to planning actions or requesting resources.
+
+2. **`list_mapped_endpoints`**
+   - **Input:** `{ "limit": Option<usize> }`
+   - **Operation:** Queries verified endpoints from the SQLite storage engine for the active program.
+   - **Output:** Array of endpoint records (`url`, `host`, `path`, `status_code`, `discovered_via`).
+
+3. **`list_security_findings`**
+   - **Input:** `{ "severity": Option<String> }` (e.g., `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO`)
+   - **Operation:** Queries verified security findings from SQLite, resolving target URLs via endpoint foreign keys.
+   - **Output:** Array of structured findings (`id`, `finding_type`, `severity`, `title`, `target_url`, `evidence`, `remediation`).
+
+4. **`generate_assessment_report`**
+   - **Input:** `{}`
+   - **Operation:** Invokes `ReportGenerator::generate_markdown()`, synthesizing program metadata, RoE attribution, endpoint statistics, and finding breakdowns.
+   - **Output:** Structured response containing the complete Markdown assessment report text.
