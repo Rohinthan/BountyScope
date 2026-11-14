@@ -14,3 +14,7 @@ data/*.db-shm
 
 # Agent skills and configurations
 .agents/
+
+# Agent instructions and rules
+RULES.md
+GEMINI.md
