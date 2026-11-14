@@ -182,60 +182,97 @@ impl<'a> SafeVerificationRunner<'a> {
                     }
                 }
 
-                // Security headers: Content-Security-Policy (CSP)
-                let csp_header = resp
-                    .headers
-                    .iter()
-                    .find(|(k, _)| k.eq_ignore_ascii_case("content-security-policy"))
-                    .map(|(_, v)| v.as_str());
+                // Security headers evaluated for HTML documents: Content-Security-Policy (CSP) & Clickjacking
+                let is_html = resp
+                    .content_type()
+                    .map(|ct| ct.to_ascii_lowercase().contains("text/html"))
+                    .unwrap_or(false);
 
-                let mut has_frame_ancestors = false;
-                match csp_header {
-                    Some(csp) => {
-                        let lower_csp = csp.to_ascii_lowercase();
-                        if lower_csp.contains("frame-ancestors") {
-                            has_frame_ancestors = true;
+                if is_html {
+                    let csp_header = resp
+                        .headers
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("content-security-policy"))
+                        .map(|(_, v)| v.as_str());
+
+                    let mut has_frame_ancestors = false;
+                    match csp_header {
+                        Some(csp) => {
+                            let lower_csp = csp.to_ascii_lowercase();
+                            if lower_csp.contains("frame-ancestors") {
+                                has_frame_ancestors = true;
+                            }
+                            if lower_csp.contains("'unsafe-inline'")
+                                || lower_csp.contains("'unsafe-eval'")
+                            {
+                                let finding = FindingEntry {
+                                    program_id: self.program_id.clone(),
+                                    endpoint_id: Some(endpoint.id.clone()),
+                                    finding_type: "weak_csp".to_string(),
+                                    severity: "LOW".to_string(),
+                                    title: "Permissive Content-Security-Policy Directives".to_string(),
+                                    description: "The Content-Security-Policy permits 'unsafe-inline' or 'unsafe-eval', weakening script injection defenses.".to_string(),
+                                    evidence: serde_json::json!({
+                                        "url": endpoint.url,
+                                        "csp": csp,
+                                    })
+                                    .to_string(),
+                                    remediation: Some(
+                                        "Refactor inline scripts and dynamic evaluations to eliminate 'unsafe-inline' and 'unsafe-eval'. Use nonces or hashes.".to_string(),
+                                    ),
+                                };
+                                self.record_finding(finding)?;
+                            }
                         }
-                        if lower_csp.contains("'unsafe-inline'")
-                            || lower_csp.contains("'unsafe-eval'")
-                        {
+                        None => {
                             let finding = FindingEntry {
                                 program_id: self.program_id.clone(),
                                 endpoint_id: Some(endpoint.id.clone()),
-                                finding_type: "weak_csp".to_string(),
+                                finding_type: "missing_security_headers".to_string(),
                                 severity: "LOW".to_string(),
-                                title: "Permissive Content-Security-Policy Directives".to_string(),
-                                description: "The Content-Security-Policy permits 'unsafe-inline' or 'unsafe-eval', weakening script injection defenses.".to_string(),
+                                title: "Missing Content-Security-Policy Header".to_string(),
+                                description: "The endpoint does not return a Content-Security-Policy header.".to_string(),
                                 evidence: serde_json::json!({
                                     "url": endpoint.url,
-                                    "csp": csp,
+                                    "missing_header": "Content-Security-Policy",
                                 })
                                 .to_string(),
                                 remediation: Some(
-                                    "Refactor inline scripts and dynamic evaluations to eliminate 'unsafe-inline' and 'unsafe-eval'. Use nonces or hashes.".to_string(),
+                                    "Implement a restrictive Content-Security-Policy header defining authorized script-src and default-src directives.".to_string(),
                                 ),
                             };
                             self.record_finding(finding)?;
                         }
                     }
-                    None => {
-                        let finding = FindingEntry {
-                            program_id: self.program_id.clone(),
-                            endpoint_id: Some(endpoint.id.clone()),
-                            finding_type: "missing_security_headers".to_string(),
-                            severity: "LOW".to_string(),
-                            title: "Missing Content-Security-Policy Header".to_string(),
-                            description: "The endpoint does not return a Content-Security-Policy header.".to_string(),
-                            evidence: serde_json::json!({
-                                "url": endpoint.url,
-                                "missing_header": "Content-Security-Policy",
-                            })
-                            .to_string(),
-                            remediation: Some(
-                                "Implement a restrictive Content-Security-Policy header defining authorized script-src and default-src directives.".to_string(),
-                            ),
-                        };
-                        self.record_finding(finding)?;
+
+                    // Security headers: Clickjacking protection (X-Frame-Options or CSP frame-ancestors)
+                    if !has_frame_ancestors {
+                        let xfo_valid = resp.headers.iter().any(|(k, v)| {
+                            k.eq_ignore_ascii_case("x-frame-options")
+                                && (v.trim().eq_ignore_ascii_case("deny")
+                                    || v.trim().eq_ignore_ascii_case("sameorigin"))
+                        });
+
+                        if !xfo_valid {
+                            let finding = FindingEntry {
+                                program_id: self.program_id.clone(),
+                                endpoint_id: Some(endpoint.id.clone()),
+                                finding_type: "missing_security_headers".to_string(),
+                                severity: "LOW".to_string(),
+                                title: "Missing Clickjacking Protection (X-Frame-Options / frame-ancestors)".to_string(),
+                                description: "The endpoint lacks both CSP 'frame-ancestors' and 'X-Frame-Options: DENY/SAMEORIGIN'.".to_string(),
+                                evidence: serde_json::json!({
+                                    "url": endpoint.url,
+                                    "csp_frame_ancestors": false,
+                                    "x_frame_options": null,
+                                })
+                                .to_string(),
+                                remediation: Some(
+                                    "Configure Content-Security-Policy with 'frame-ancestors 'none'' or set 'X-Frame-Options: DENY'.".to_string(),
+                                ),
+                            };
+                            self.record_finding(finding)?;
+                        }
                     }
                 }
 
@@ -291,36 +328,6 @@ impl<'a> SafeVerificationRunner<'a> {
                         ),
                     };
                     self.record_finding(finding)?;
-                }
-
-                // Security headers: Clickjacking protection (X-Frame-Options or CSP frame-ancestors)
-                if !has_frame_ancestors {
-                    let xfo_valid = resp.headers.iter().any(|(k, v)| {
-                        k.eq_ignore_ascii_case("x-frame-options")
-                            && (v.trim().eq_ignore_ascii_case("deny")
-                                || v.trim().eq_ignore_ascii_case("sameorigin"))
-                    });
-
-                    if !xfo_valid {
-                        let finding = FindingEntry {
-                            program_id: self.program_id.clone(),
-                            endpoint_id: Some(endpoint.id.clone()),
-                            finding_type: "missing_security_headers".to_string(),
-                            severity: "LOW".to_string(),
-                            title: "Missing Clickjacking Protection (X-Frame-Options / frame-ancestors)".to_string(),
-                            description: "The endpoint lacks both CSP 'frame-ancestors' and 'X-Frame-Options: DENY/SAMEORIGIN'.".to_string(),
-                            evidence: serde_json::json!({
-                                "url": endpoint.url,
-                                "csp_frame_ancestors": false,
-                                "x_frame_options": null,
-                            })
-                            .to_string(),
-                            remediation: Some(
-                                "Configure Content-Security-Policy with 'frame-ancestors 'none'' or set 'X-Frame-Options: DENY'.".to_string(),
-                            ),
-                        };
-                        self.record_finding(finding)?;
-                    }
                 }
 
                 // Check 4: Passive AI / MCP Endpoint Posture Check
@@ -675,5 +682,122 @@ mod tests {
             .iter()
             .any(|f| f.finding_type == "cors_misconfiguration"));
         assert_eq!(summary.findings_count, findings.len());
+    }
+
+    #[tokio::test]
+    async fn test_html_only_header_checks() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind failed");
+        let addr = listener.local_addr().expect("local_addr failed");
+        let port = addr.port();
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+
+                    let response = if req.contains("GET /api/json-data ") {
+                        // application/json response lacking CSP and XFO
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"key\":\"val\"}".to_string()
+                    } else if req.contains("GET /page/html-doc ") {
+                        // text/html response lacking CSP and XFO
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 13\r\n\r\n<h1>Hello</h1>".to_string()
+                    } else {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+                    };
+
+                    let _ = socket.write_all(response.as_bytes()).await;
+                }
+            }
+        });
+
+        let storage = StorageEngine::open_in_memory().expect("storage open failed");
+        let config = test_scope_config(port);
+        let program_id = storage
+            .upsert_program_scope(&config)
+            .expect("upsert failed");
+        let enforcer = ScopeEnforcer::new(config).expect("enforcer failed");
+        let client =
+            ScopedHttpClient::new(storage.clone(), program_id.clone(), 50).expect("client failed");
+
+        let ep_json = EndpointEntry {
+            program_id: program_id.clone(),
+            url: format!("http://127.0.0.1:{}/api/json-data", port),
+            host: "127.0.0.1".to_string(),
+            path: "/api/json-data".to_string(),
+            method: "GET".to_string(),
+            discovered_via: "seed".to_string(),
+            status_code: Some(200),
+            response_size: Some(13),
+            content_type: Some("application/json".to_string()),
+        };
+        let ep_json_id = storage
+            .upsert_endpoint(&ep_json)
+            .expect("upsert json endpoint failed");
+
+        let ep_html = EndpointEntry {
+            program_id: program_id.clone(),
+            url: format!("http://127.0.0.1:{}/page/html-doc", port),
+            host: "127.0.0.1".to_string(),
+            path: "/page/html-doc".to_string(),
+            method: "GET".to_string(),
+            discovered_via: "html_link".to_string(),
+            status_code: Some(200),
+            response_size: Some(13),
+            content_type: Some("text/html; charset=utf-8".to_string()),
+        };
+        let ep_html_id = storage
+            .upsert_endpoint(&ep_html)
+            .expect("upsert html endpoint failed");
+
+        let runner = SafeVerificationRunner::new(&enforcer, &client, &storage, program_id.clone());
+        let summary = runner.run().await.expect("runner execution failed");
+
+        assert_eq!(summary.total_audited, 2);
+
+        let findings = storage
+            .get_findings_for_program(&program_id)
+            .expect("query findings failed");
+
+        // The JSON endpoint must NOT trigger a CSP finding
+        assert!(!findings.iter().any(|f| {
+            f.endpoint_id.as_deref() == Some(&ep_json_id)
+                && f.finding_type == "missing_security_headers"
+                && f.title.contains("Content-Security-Policy")
+        }));
+
+        // The JSON endpoint must NOT trigger a clickjacking finding
+        assert!(!findings.iter().any(|f| {
+            f.endpoint_id.as_deref() == Some(&ep_json_id)
+                && f.finding_type == "missing_security_headers"
+                && f.title.contains("Clickjacking")
+        }));
+
+        // The HTML endpoint MUST trigger a CSP finding
+        assert!(findings.iter().any(|f| {
+            f.endpoint_id.as_deref() == Some(&ep_html_id)
+                && f.finding_type == "missing_security_headers"
+                && f.title.contains("Content-Security-Policy")
+        }));
+
+        // The HTML endpoint MUST trigger a clickjacking finding
+        assert!(findings.iter().any(|f| {
+            f.endpoint_id.as_deref() == Some(&ep_html_id)
+                && f.finding_type == "missing_security_headers"
+                && f.title.contains("Clickjacking")
+        }));
+
+        // Both endpoints must trigger missing X-Content-Type-Options
+        assert!(findings.iter().any(|f| {
+            f.endpoint_id.as_deref() == Some(&ep_json_id)
+                && f.finding_type == "missing_security_headers"
+                && f.title.contains("X-Content-Type-Options")
+        }));
+        assert!(findings.iter().any(|f| {
+            f.endpoint_id.as_deref() == Some(&ep_html_id)
+                && f.finding_type == "missing_security_headers"
+                && f.title.contains("X-Content-Type-Options")
+        }));
     }
 }

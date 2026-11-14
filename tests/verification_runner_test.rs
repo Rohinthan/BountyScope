@@ -28,6 +28,9 @@ async fn test_offline_verification_runner_and_report_generation() {
                         // Missing CSP, missing XCTO, missing XFO, verbose headers
                         "HTTP/1.1 200 OK\r\nX-Powered-By: Express/4.18\r\nServer: Apache/2.4.52 (Ubuntu)\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"user\":\"admin\"}".to_string()
                     }
+                } else if req.contains("GET /dashboard ") {
+                    // HTML endpoint missing CSP and clickjacking headers
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 13\r\n\r\n<h1>Admin</h1>".to_string()
                 } else if req.contains("GET /static/font.woff2 ") {
                     // Static asset: reflects origin, but must be exempted
                     "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: https://untrusted.example.invalid\r\nContent-Type: font/woff2\r\nContent-Length: 4\r\n\r\nFONT".to_string()
@@ -125,11 +128,26 @@ async fn test_offline_verification_runner_and_report_generation() {
         .upsert_endpoint(&ep_spec)
         .expect("upsert ep_spec failed");
 
+    let ep_dashboard = EndpointEntry {
+        program_id: program_id.clone(),
+        url: format!("http://127.0.0.1:{}/dashboard", port),
+        host: "127.0.0.1".to_string(),
+        path: "/dashboard".to_string(),
+        method: "GET".to_string(),
+        discovered_via: "seed".to_string(),
+        status_code: Some(200),
+        response_size: Some(13),
+        content_type: Some("text/html; charset=utf-8".to_string()),
+    };
+    storage
+        .upsert_endpoint(&ep_dashboard)
+        .expect("upsert ep_dashboard failed");
+
     // Execute verification runner
     let runner = SafeVerificationRunner::new(&enforcer, &client, &storage, program_id.clone());
     let summary = runner.run().await.expect("runner execution failed");
 
-    assert_eq!(summary.total_audited, 4);
+    assert_eq!(summary.total_audited, 5);
     assert!(summary.findings_count >= 5);
     // Credentialed CORS reflection produces a HIGH severity finding
     assert!(summary.high_count >= 1);

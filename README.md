@@ -359,6 +359,7 @@ Detailed architectural and implementation documentation is available in the [Doc
 - [02_ARCHITECTURE.md](file:///home/stringray/BountyScope/Doc/02_ARCHITECTURE.md): Component diagrams, `VerifiedScopeUrl` state pattern, SQLite schema, and MCP server design.
 - [03_SECURITY_CHECKS.md](file:///home/stringray/BountyScope/Doc/03_SECURITY_CHECKS.md): Check logic for headers, CORS, OpenAPI specs, static asset exemptions, and false-positive filtering.
 - [04_LOCAL_LAB_GUIDE.md](file:///home/stringray/BountyScope/Doc/04_LOCAL_LAB_GUIDE.md): Lab configuration, mock API definitions, and testing workflows.
+- [05_TECHNICAL_REFERENCE.md](file:///home/stringray/BountyScope/Doc/05_TECHNICAL_REFERENCE.md): Consolidated technical reference synthesizing system architecture, canonicalization, persistence, security checks, and CLI ergonomics.
 
 ---
 
