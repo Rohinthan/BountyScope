@@ -1,6 +1,6 @@
 # BountyScope
 
-[![Version](https://img.shields.io/badge/version-0.15.1-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.15.2-blue.svg)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
 BountyScope is a scope-locked reconnaissance, passive policy auditing, and Model Context Protocol (MCP) triage command-line interface written in Rust. It is engineered for authorized bug bounty programs, defensive security reviews, and vulnerability disclosure assessments. The system guarantees strict scope boundaries, non-destructive policy evaluation, deterministic rate limiting, and compile-time target verification before executing any network interactions.
@@ -265,7 +265,7 @@ Similarly, `--output` on `report` and `scan` defaults to `data/<sanitized_progra
 | `validate-scope` | Verifies YAML syntax and scope boundary integrity. | `[--config]` | Console validation summary |
 | `scan` | Unified pipeline: maps surface, audits endpoints, and exports report. | `--url`, `[--config]`, `[--db]`, `[--output]` | SQLite database and Markdown report |
 | `probe` | Safely evaluates and probes a single in-scope URL. | `--url`, `[--config]`, `[--db]` | HTTP status, headers, audit log entry |
-| `map` | Passively extracts links, scripts, and API specs from a seed URL. | `--url`, `[--config]`, `[--db]` | Discovered endpoints in SQLite |
+| `map` | Passively extracts links, scripts, source maps, sitemaps, security policies, and API specs from a seed URL. | `--url`, `[--config]`, `[--db]` | Discovered endpoints in SQLite |
 | `audit` | Evaluates HTTP headers, CORS policies, and spec disclosures. | `[--config]`, `[--db]` | Audit findings summary |
 | `report` | Generates a Markdown assessment report with findings and evidence. | `[--config]`, `[--db]`, `[--output]`, `[--stdout]` | Markdown report (file or stdout) |
 | `diff` | Compares historical scan snapshots to identify regressions, status transitions, and surface deltas. | `[--config]`, `[--db]`, `[--from]`, `[--to]`, `[--output]`, `[--stdout]` | Markdown diff report (file or stdout) |
@@ -350,17 +350,35 @@ bountyscope map --config configs/scope.example.yaml --url http://127.0.0.1:8080/
 
 Sample output:
 ```text
-Surface mapping complete for http://127.0.0.1:8080/: 14 endpoints discovered (9 in-scope, 5 out-of-scope discarded)
+Surface mapping complete for http://127.0.0.1:8080/: 18 endpoints discovered (13 in-scope, 5 out-of-scope discarded)
   [seed] http://127.0.0.1:8080/ (HTTP 200)
   [html_link] http://127.0.0.1:8080/dashboard (unprobed)
   [html_script] http://127.0.0.1:8080/static/app.js (HTTP 200)
   [js_route] http://127.0.0.1:8080/api/v1/users (unprobed)
   [js_route] http://127.0.0.1:8080/api/v2/metrics (unprobed)
   [js_route] http://127.0.0.1:8080/graphql (unprobed)
+  [js_subdomain] https://api.example.com/v1/telemetry (unprobed)
+  [source_map] http://127.0.0.1:8080/static/app.js.map (HTTP 200)
+  [source_map] http://127.0.0.1:8080/api/v2/internal-metrics (unprobed)
   [robots_txt] http://127.0.0.1:8080/robots.txt (HTTP 200)
   [robots_txt] http://127.0.0.1:8080/admin (unprobed)
+  [sitemap_xml] http://127.0.0.1:8080/sitemap.xml (HTTP 200)
+  [sitemap_xml] http://127.0.0.1:8080/pricing (unprobed)
+  [security_txt] http://127.0.0.1:8080/.well-known/security.txt (HTTP 200)
+  [security_txt] http://127.0.0.1:8080/security-policy (unprobed)
   [openapi_spec] http://127.0.0.1:8080/openapi.json (HTTP 200)
 ```
+
+#### Discovery Channels & `discovered_via` Provenance
+- **`seed`**: Initial verified target entry point provided via `--url`.
+- **`html_link`** / **`html_script`**: Static DOM elements (`<a href>`, `<script src>`) extracted from seed HTML.
+- **`js_route`**: Relative API routes (`/api/...`, `/v1/...`, `/graphql`) mined from JavaScript bundles and inline scripts.
+- **`js_subdomain`**: In-scope absolute URLs mined from HTML/JS, discovering related subdomains when wildcard patterns (e.g., `*.example.com`) are configured in `allowed_domains`.
+- **`source_map`**: JavaScript source maps (`//# sourceMappingURL=...`) inspected for hidden routes and `"sources"` entries, failing closed if pointing to an out-of-scope CDN.
+- **`robots_txt`**: Paths extracted from `/robots.txt` (`Disallow:` and `Allow:` rules).
+- **`sitemap_xml`**: Canonical URLs extracted from `<loc>` tags in `/sitemap.xml` with soft-404 HTML rejection.
+- **`security_txt`**: Security contact, policy, and canonical URLs extracted from RFC 9116 `/.well-known/security.txt`.
+- **`openapi_spec`**: REST / Swagger specifications discovered at `/openapi.json`, `/swagger.json`, `/v3/api-docs` with strict JSON schema verification and soft-404 rejection.
 
 ### 5. Audit Mapped Endpoints
 

@@ -43,11 +43,36 @@ async fn test_offline_surface_mapper_end_to_end() {
                     let js = r#"
                     const inventoryUrl = "/api/v2/inventory";
                     const gqlEndpoint = "/graphql";
+                    //# sourceMappingURL=/assets/main.js.map
                     "#;
                     format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nContent-Length: {}\r\n\r\n{}",
                         js.len(),
                         js
+                    )
+                } else if req.contains("GET /assets/main.js.map ") {
+                    let map = r#"{"version": 3, "sources": ["/api/v3/telemetry"]}"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        map.len(),
+                        map
+                    )
+                } else if req.contains("GET /sitemap.xml ") {
+                    let sitemap = r#"<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>/pricing</loc></url>
+</urlset>"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\n\r\n{}",
+                        sitemap.len(),
+                        sitemap
+                    )
+                } else if req.contains("GET /.well-known/security.txt ") {
+                    let sec = "Contact: mailto:sec@example.com\nPolicy: /security\nCanonical: /.well-known/security.txt\n";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                        sec.len(),
+                        sec
                     )
                 } else if req.contains("GET /robots.txt ") {
                     let robots = "User-agent: *\nDisallow: /docs\nDisallow: /logout\n";
@@ -133,6 +158,19 @@ async fn test_offline_surface_mapper_end_to_end() {
     assert!(urls.iter().any(|u| u.ends_with("/robots.txt")));
     assert!(urls.iter().any(|u| u.ends_with("/docs")));
     assert!(urls.iter().any(|u| u.ends_with("/openapi.json")));
+    assert!(urls.iter().any(|u| u.ends_with("/sitemap.xml")));
+    assert!(urls.iter().any(|u| u.ends_with("/pricing")));
+    assert!(urls
+        .iter()
+        .any(|u| u.ends_with("/.well-known/security.txt")));
+    assert!(urls.iter().any(|u| u.ends_with("/security")));
+    assert!(urls.iter().any(|u| u.ends_with("/assets/main.js.map")));
+    assert!(urls.iter().any(|u| u.ends_with("/api/v3/telemetry")));
+
+    // Verify discovered_via tags
+    assert!(endpoints.iter().any(|e| e.discovered_via == "sitemap_xml"));
+    assert!(endpoints.iter().any(|e| e.discovered_via == "security_txt"));
+    assert!(endpoints.iter().any(|e| e.discovered_via == "source_map"));
 
     // Verify soft-404 /swagger.json was rejected and not persisted as openapi_spec
     assert!(!urls.iter().any(|u| u.ends_with("/swagger.json")));

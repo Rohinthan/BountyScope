@@ -1,6 +1,6 @@
 # BountyScope Consolidated Technical Reference
 
-**Document Version:** 0.15.1  
+**Document Version:** 0.15.2  
 **Specification Level:** Final Technical Reference  
 **Applicability:** `bountyscope` CLI and Core Subsystems  
 
@@ -58,7 +58,7 @@ The codebase is organized into modular subsystems under `src/`:
 | `scope` | `src/scope/mod.rs` | YAML scope parsing (`ScopeConfig`), domain/IP canonicalization, lexical path traversal normalization, wildcard DNS boundary checks, and the opaque type-state token `VerifiedScopeUrl`. |
 | `http` | `src/http/mod.rs` | Transport client (`ScopedHttpClient`, `HttpProbeResponse`) configured with `Policy::none()`, mutex-driven inter-request pacing, 5 MiB response chunk limits, researcher attribution headers, and synchronous audit logging. |
 | `storage` | `src/storage/mod.rs` | SQLite persistence engine (`StorageEngine`) operating with `WAL` journaling and `foreign_keys = ON`, managing relational records for programs, scope rules, endpoints, findings, and audit logs. |
-| `mapper` | `src/mapper/mod.rs` | Attack surface crawler (`SurfaceMapper`) executing DOM-based HTML link/script extraction, regex-based JavaScript API route mining, technical asset discovery (`/robots.txt`), API specification discovery (`/openapi.json`), and soft-404 filtering. |
+| `mapper` | `src/mapper/mod.rs` | Attack surface crawler (`SurfaceMapper`) executing DOM-based HTML link/script extraction, regex-based JavaScript API route mining, in-scope wildcard subdomain extraction, JavaScript source map inspection (`.js.map`), technical asset discovery (`/robots.txt`, `/sitemap.xml`, RFC 9116 `/.well-known/security.txt`), API specification discovery (`/openapi.json`), and soft-404 filtering. |
 | `verifier` | `src/verifier/mod.rs` | Security policy evaluator (`SafeVerificationRunner`) checking HTML-gated headers (CSP, clickjacking), transport headers (HSTS, nosniff), CORS reflection, header disclosures, and unauthenticated AI/MCP endpoint posture. |
 | `report` | `src/report/mod.rs` | Assessment report engine (`ReportGenerator`) rendering structured Markdown documents containing severity breakdown matrices, detailed finding descriptions, JSON evidence blocks, and remediation steps. |
 | `mcp` | `src/mcp/mod.rs` | Native Model Context Protocol server (`BountyScopeMcpServer`) conforming to JSON-RPC 2.0 over standard I/O (`stdio`), providing declarative tools (`check_target_scope`, `list_mapped_endpoints`, `list_security_findings`, `generate_assessment_report`) with diagnostic output isolated to `stderr`. |
@@ -95,6 +95,23 @@ When a remote web server responds with an HTTP redirect status (`301 Moved Perma
 
 **Architectural Rationale:**  
 Automatic redirect following is a common source of scope escapes in security tooling. A target host on an authorized domain could redirect requests to an out-of-scope third-party authentication provider (e.g., `auth.thirdparty.com`) or cloud metadata service (`169.254.169.254`). By terminating the request at the redirect boundary, BountyScope returns the redirect location to the caller. The destination must be passed back through `ScopeEnforcer::validate_url()` to acquire a new `VerifiedScopeUrl` before any subsequent request can be dispatched.
+
+### Passive Surface Mapping Pipeline (`SurfaceMapper`)
+
+The surface mapper crawls and catalogs attack surfaces starting from an authorized seed URL without performing aggressive fuzzing or destructive interactions. Every candidate endpoint is passed through `ScopeEnforcer::validate_url()`; out-of-scope candidates increment `out_of_scope_discarded` and are discarded before any network request can occur.
+
+| Discovery Channel | `discovered_via` | Source Description & Scope Boundary Behavior |
+|---|---|---|
+| **Seed Target** | `seed` | The entry-point URL validated against `allowed_domains`. Recorded with response status, body size, and MIME content type. |
+| **HTML Navigation** | `html_link` | Links extracted from `<a href="...">` elements. Fragment identifiers (`#...`) are stripped; relative paths are resolved against seed. |
+| **Script Includes** | `html_script` | External scripts referenced via `<script src="...">`. In-scope bundles are fetched (subject to rate limit) to extract further routes. |
+| **Route Literals** | `js_route` | Relative API endpoints matching `/(api\|v[0-9]+\|graphql)...` mined via regex from JavaScript bundles and inline scripts. |
+| **Subdomain Extraction** | `js_subdomain` | Absolute `https://` / `http://` URLs extracted from HTML and script text. Enables automatic discovery of authorized wildcard subdomains (e.g., `*.example.com`) while strictly dropping excluded or unauthorized domains. |
+| **JavaScript Source Maps** | `source_map` | Resolves `//# sourceMappingURL=...` directives. If the source map references an out-of-scope CDN (e.g. `cdn.external.com`), it fails closed immediately without dispatching requests. In-scope maps are fetched and parsed for JSON `"sources"` entries and embedded API routes. |
+| **Robots Exclusion** | `robots_txt` | Probes `/robots.txt` and parses `Disallow:` and `Allow:` paths. Wildcards (`*`) are truncated to base paths; non-conforming or excluded paths are dropped. |
+| **Sitemap XML** | `sitemap_xml` | Probes `/sitemap.xml`, rejects soft-404 HTML responses, and extracts canonical URLs from `<loc>` tags, passing each through `ScopeEnforcer`. |
+| **Security Policies** | `security_txt` | Probes RFC 9116 `/.well-known/security.txt`. Extracts URIs from `Policy:`, `Canonical:`, and `Acknowledgments:` directives without flagging missing files as security findings. |
+| **API Specifications** | `openapi_spec` | Probes candidate spec paths (`/openapi.json`, `/swagger.json`, `/v3/api-docs`). Discards soft-404 HTML pages and requires valid JSON containing root `openapi` or `swagger` keys. |
 
 ---
 

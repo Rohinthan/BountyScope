@@ -35,6 +35,10 @@ pub struct SurfaceMapResult {
 /// - External and inline JavaScript bundles (`<script src>` and inline scripts)
 /// - Relative API route patterns in client code (`/api/...`, `/v1/...`, `/graphql`)
 /// - Directives in technical asset files (`/robots.txt`)
+/// - Standard XML sitemaps (`/sitemap.xml`)
+/// - RFC 9116 security policies (`/.well-known/security.txt`)
+/// - JavaScript source maps (`.js.map`)
+/// - In-scope wildcard subdomains (`js_subdomain`)
 /// - Standard OpenAPI/Swagger specifications with soft-404 false-positive filtering
 pub struct SurfaceMapper<'a> {
     enforcer: &'a ScopeEnforcer,
@@ -42,6 +46,10 @@ pub struct SurfaceMapper<'a> {
     storage: &'a StorageEngine,
     program_id: String,
     route_regex: Regex,
+    full_url_regex: Regex,
+    source_map_regex: Regex,
+    sitemap_loc_regex: Regex,
+    sec_url_regex: Regex,
 }
 
 impl<'a> SurfaceMapper<'a> {
@@ -54,6 +62,11 @@ impl<'a> SurfaceMapper<'a> {
     ) -> Result<Self, MapperError> {
         let route_regex =
             Regex::new(r#"["'`](/(?:api|v[0-9]+|graphql)[a-zA-Z0-9_\-/\.\?=&%#]*)["'`]"#)?;
+        let full_url_regex =
+            Regex::new(r#"https?://[a-zA-Z0-9\.\-]+(?::[0-9]+)?(?:/[^\s"'`<>\\)]*)?"#)?;
+        let source_map_regex = Regex::new(r#"(?m)(?://|/\*)[#@]\s*sourceMappingURL=([^\s\*]+)"#)?;
+        let sitemap_loc_regex = Regex::new(r#"(?i)<loc>\s*([^<\s]+)\s*</loc>"#)?;
+        let sec_url_regex = Regex::new(r#"https?://[^\s"'`<>]+"#)?;
 
         Ok(Self {
             enforcer,
@@ -61,6 +74,10 @@ impl<'a> SurfaceMapper<'a> {
             storage,
             program_id,
             route_regex,
+            full_url_regex,
+            source_map_regex,
+            sitemap_loc_regex,
+            sec_url_regex,
         })
     }
 
@@ -130,6 +147,14 @@ impl<'a> SurfaceMapper<'a> {
 
         // Probe technical asset files (/robots.txt)
         self.discover_robots_txt(seed, &mut discovered_map, &mut out_of_scope_discarded)
+            .await?;
+
+        // Probe sitemap (/sitemap.xml)
+        self.discover_sitemap_xml(seed, &mut discovered_map, &mut out_of_scope_discarded)
+            .await?;
+
+        // Probe security policy (/.well-known/security.txt)
+        self.discover_security_txt(seed, &mut discovered_map, &mut out_of_scope_discarded)
             .await?;
 
         // Probe API documentation specifications (/openapi.json, /swagger.json, /v3/api-docs)
@@ -277,16 +302,44 @@ impl<'a> SurfaceMapper<'a> {
             }
         }
 
-        // Extract routes from inline <script> tags
+        // Shared set of evaluated full URLs to avoid duplicate processing/counting
+        let mut seen_full_urls: HashSet<String> = HashSet::new();
+        seen_full_urls.extend(seen_links.iter().cloned());
+        seen_full_urls.extend(seen_scripts.iter().cloned());
+
+        // Extract in-scope subdomains and full URLs from HTML content
+        self.extract_subdomains_and_full_urls(
+            html_str,
+            &mut seen_full_urls,
+            discovered_map,
+            out_of_scope_discarded,
+        );
+
+        // Extract routes and subdomains from inline <script> tags
         let inline_script_selector = Selector::parse("script:not([src])")
             .map_err(|e| MapperError::Selector(format!("{e:?}")))?;
 
         for element in document.select(&inline_script_selector) {
             let script_text = element.text().collect::<Vec<_>>().join("");
             self.extract_js_routes(seed, &script_text, discovered_map, out_of_scope_discarded);
+            self.extract_subdomains_and_full_urls(
+                &script_text,
+                &mut seen_full_urls,
+                discovered_map,
+                out_of_scope_discarded,
+            );
+            self.inspect_source_map(
+                seed,
+                seed,
+                &script_text,
+                &mut seen_full_urls,
+                discovered_map,
+                out_of_scope_discarded,
+            )
+            .await?;
         }
 
-        // Fetch each in-scope script and extract routes
+        // Fetch each in-scope script, extract routes, subdomains, and inspect source maps
         for script_verified in scripts_to_fetch {
             let script_url_str = script_verified.as_str().to_string();
             let host = script_verified
@@ -322,6 +375,21 @@ impl<'a> SurfaceMapper<'a> {
                             discovered_map,
                             out_of_scope_discarded,
                         );
+                        self.extract_subdomains_and_full_urls(
+                            js_content,
+                            &mut seen_full_urls,
+                            discovered_map,
+                            out_of_scope_discarded,
+                        );
+                        self.inspect_source_map(
+                            seed,
+                            &script_verified,
+                            js_content,
+                            &mut seen_full_urls,
+                            discovered_map,
+                            out_of_scope_discarded,
+                        )
+                        .await?;
                     }
                 }
                 Err(_) => {
@@ -392,6 +460,225 @@ impl<'a> SurfaceMapper<'a> {
                     Err(_) => {}
                 }
             }
+        }
+    }
+
+    /// Extracts absolute HTTP/HTTPS URLs embedded in HTML or JavaScript bundles and validates them against scope rules.
+    fn extract_subdomains_and_full_urls(
+        &self,
+        content: &str,
+        seen_urls: &mut HashSet<String>,
+        discovered_map: &mut BTreeMap<String, DiscoveredEndpoint>,
+        out_of_scope_discarded: &mut usize,
+    ) {
+        for mat in self.full_url_regex.find_iter(content) {
+            let raw_url = mat.as_str();
+            let clean_url = raw_url.trim_end_matches(|c: char| {
+                c == '.'
+                    || c == ','
+                    || c == ';'
+                    || c == ')'
+                    || c == ']'
+                    || c == '\''
+                    || c == '"'
+                    || c == '`'
+            });
+
+            if clean_url.is_empty() || !seen_urls.insert(clean_url.to_string()) {
+                continue;
+            }
+
+            match self.enforcer.validate_url(clean_url) {
+                Ok(verified) => {
+                    let host = verified.as_url().host_str().unwrap_or("").to_string();
+                    let path = verified.as_url().path().to_string();
+                    let url_str = verified.as_str().to_string();
+
+                    discovered_map
+                        .entry(url_str.clone())
+                        .or_insert_with(|| DiscoveredEndpoint {
+                            url: url_str,
+                            host,
+                            path,
+                            discovered_via: "js_subdomain".to_string(),
+                            status_code: None,
+                            response_size: None,
+                            content_type: None,
+                        });
+                }
+                Err(ScopeError::DomainNotAllowed(_))
+                | Err(ScopeError::DomainExcluded(_))
+                | Err(ScopeError::PathExcluded(_)) => {
+                    *out_of_scope_discarded += 1;
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
+    /// Inspects JavaScript text for source map directives (//# sourceMappingURL=...) and extracts routes.
+    async fn inspect_source_map(
+        &self,
+        seed: &VerifiedScopeUrl,
+        script_url: &VerifiedScopeUrl,
+        js_code: &str,
+        seen_full_urls: &mut HashSet<String>,
+        discovered_map: &mut BTreeMap<String, DiscoveredEndpoint>,
+        out_of_scope_discarded: &mut usize,
+    ) -> Result<(), MapperError> {
+        for cap in self.source_map_regex.captures_iter(js_code) {
+            if let Some(map_match) = cap.get(1) {
+                let map_ref = map_match.as_str().trim_end_matches("*/").trim();
+                if map_ref.is_empty() || map_ref.starts_with("data:") {
+                    continue;
+                }
+
+                let mut candidate_url = match script_url.as_url().join(map_ref) {
+                    Ok(u) => u,
+                    Err(_) => continue,
+                };
+                candidate_url.set_fragment(None);
+
+                let verified_map = match self.enforcer.validate_url(candidate_url.as_str()) {
+                    Ok(v) => v,
+                    Err(ScopeError::DomainNotAllowed(_))
+                    | Err(ScopeError::DomainExcluded(_))
+                    | Err(ScopeError::PathExcluded(_)) => {
+                        *out_of_scope_discarded += 1;
+                        continue;
+                    }
+                    Err(_) => continue,
+                };
+
+                let map_url_str = verified_map.as_str().to_string();
+                if let Ok(resp) = self.http_client.get(&verified_map).await {
+                    if resp.status_code == 200 {
+                        let host = verified_map.as_url().host_str().unwrap_or("").to_string();
+                        let path = verified_map.as_url().path().to_string();
+
+                        discovered_map.insert(
+                            map_url_str,
+                            DiscoveredEndpoint {
+                                url: verified_map.as_str().to_string(),
+                                host,
+                                path,
+                                discovered_via: "source_map".to_string(),
+                                status_code: Some(resp.status_code),
+                                response_size: Some(resp.body.len()),
+                                content_type: resp.content_type().map(|s| s.to_string()),
+                            },
+                        );
+
+                        if let Ok(body_str) = resp.body_as_str() {
+                            let mut seen_map_routes = HashSet::new();
+
+                            // 1. Parse JSON "sources" array if valid JSON
+                            if let Ok(json_val) =
+                                serde_json::from_str::<serde_json::Value>(body_str)
+                            {
+                                if let Some(sources) =
+                                    json_val.get("sources").and_then(|s| s.as_array())
+                                {
+                                    for item in sources {
+                                        if let Some(src_str) = item.as_str() {
+                                            self.evaluate_source_map_candidate_route(
+                                                seed,
+                                                src_str,
+                                                &mut seen_map_routes,
+                                                discovered_map,
+                                                out_of_scope_discarded,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 2. Extract embedded API route literals from source map text
+                            for route_cap in self.route_regex.captures_iter(body_str) {
+                                if let Some(matched) = route_cap.get(1) {
+                                    self.evaluate_source_map_candidate_route(
+                                        seed,
+                                        matched.as_str(),
+                                        &mut seen_map_routes,
+                                        discovered_map,
+                                        out_of_scope_discarded,
+                                    );
+                                }
+                            }
+
+                            // 3. Extract any full URLs embedded in the source map
+                            self.extract_subdomains_and_full_urls(
+                                body_str,
+                                seen_full_urls,
+                                discovered_map,
+                                out_of_scope_discarded,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn evaluate_source_map_candidate_route(
+        &self,
+        seed: &VerifiedScopeUrl,
+        route_candidate: &str,
+        seen_map_routes: &mut HashSet<String>,
+        discovered_map: &mut BTreeMap<String, DiscoveredEndpoint>,
+        out_of_scope_discarded: &mut usize,
+    ) {
+        let trimmed = route_candidate.trim();
+        let path = if trimmed.starts_with('/') {
+            trimmed
+        } else if let Some(idx) = trimmed.find("/api/") {
+            &trimmed[idx..]
+        } else if let Some(idx) = trimmed.find("/v1/") {
+            &trimmed[idx..]
+        } else if let Some(idx) = trimmed.find("/v2/") {
+            &trimmed[idx..]
+        } else if let Some(idx) = trimmed.find("/graphql") {
+            &trimmed[idx..]
+        } else {
+            return;
+        };
+
+        if !seen_map_routes.insert(path.to_string()) {
+            return;
+        }
+
+        let mut candidate = match seed.as_url().join(path) {
+            Ok(u) => u,
+            Err(_) => return,
+        };
+        candidate.set_fragment(None);
+
+        match self.enforcer.validate_url(candidate.as_str()) {
+            Ok(verified) => {
+                let host = verified.as_url().host_str().unwrap_or("").to_string();
+                let p = verified.as_url().path().to_string();
+                let u = verified.as_str().to_string();
+
+                discovered_map
+                    .entry(u.clone())
+                    .or_insert_with(|| DiscoveredEndpoint {
+                        url: u,
+                        host,
+                        path: p,
+                        discovered_via: "source_map".to_string(),
+                        status_code: None,
+                        response_size: None,
+                        content_type: None,
+                    });
+            }
+            Err(ScopeError::DomainNotAllowed(_))
+            | Err(ScopeError::DomainExcluded(_))
+            | Err(ScopeError::PathExcluded(_)) => {
+                *out_of_scope_discarded += 1;
+            }
+            Err(_) => {}
         }
     }
 
@@ -496,7 +783,278 @@ impl<'a> SurfaceMapper<'a> {
         Ok(())
     }
 
-    /// Discovers common OpenAPI and Swagger documentation endpoints with soft-404 filtering.
+    /// Discovers paths listed in /sitemap.xml.
+    async fn discover_sitemap_xml(
+        &self,
+        seed: &VerifiedScopeUrl,
+        discovered_map: &mut BTreeMap<String, DiscoveredEndpoint>,
+        out_of_scope_discarded: &mut usize,
+    ) -> Result<(), MapperError> {
+        let sitemap_candidate = match seed.as_url().join("/sitemap.xml") {
+            Ok(u) => u,
+            Err(_) => return Ok(()),
+        };
+
+        let verified_sitemap = match self.enforcer.validate_url(sitemap_candidate.as_str()) {
+            Ok(v) => v,
+            Err(_) => return Ok(()),
+        };
+
+        if let Ok(resp) = self.http_client.get(&verified_sitemap).await {
+            if resp.status_code == 200 {
+                let ct = resp.content_type().unwrap_or("").to_ascii_lowercase();
+                if let Ok(body_str) = resp.body_as_str() {
+                    let trimmed_body = body_str.trim_start().to_ascii_lowercase();
+                    let is_html = ct.contains("text/html")
+                        || trimmed_body.starts_with("<!doctype")
+                        || trimmed_body.starts_with("<html");
+
+                    if !is_html
+                        && (body_str.contains("<loc>")
+                            || body_str.contains("<urlset")
+                            || body_str.contains("<sitemapindex"))
+                    {
+                        let host = verified_sitemap
+                            .as_url()
+                            .host_str()
+                            .unwrap_or("")
+                            .to_string();
+                        let path = verified_sitemap.as_url().path().to_string();
+                        let url_str = verified_sitemap.as_str().to_string();
+
+                        discovered_map.insert(
+                            url_str,
+                            DiscoveredEndpoint {
+                                url: verified_sitemap.as_str().to_string(),
+                                host,
+                                path,
+                                discovered_via: "sitemap_xml".to_string(),
+                                status_code: Some(resp.status_code),
+                                response_size: Some(resp.body.len()),
+                                content_type: resp.content_type().map(|s| s.to_string()),
+                            },
+                        );
+
+                        let mut seen_locs = HashSet::new();
+                        for cap in self.sitemap_loc_regex.captures_iter(body_str) {
+                            if let Some(m) = cap.get(1) {
+                                let loc_str = m.as_str().trim();
+                                if !seen_locs.insert(loc_str.to_string()) {
+                                    continue;
+                                }
+
+                                let mut candidate = match seed.as_url().join(loc_str) {
+                                    Ok(u) => u,
+                                    Err(_) => continue,
+                                };
+                                candidate.set_fragment(None);
+
+                                match self.enforcer.validate_url(candidate.as_str()) {
+                                    Ok(verified) => {
+                                        let h =
+                                            verified.as_url().host_str().unwrap_or("").to_string();
+                                        let p = verified.as_url().path().to_string();
+                                        let u = verified.as_str().to_string();
+
+                                        discovered_map.entry(u.clone()).or_insert_with(|| {
+                                            DiscoveredEndpoint {
+                                                url: u,
+                                                host: h,
+                                                path: p,
+                                                discovered_via: "sitemap_xml".to_string(),
+                                                status_code: None,
+                                                response_size: None,
+                                                content_type: None,
+                                            }
+                                        });
+                                    }
+                                    Err(ScopeError::DomainNotAllowed(_))
+                                    | Err(ScopeError::DomainExcluded(_))
+                                    | Err(ScopeError::PathExcluded(_)) => {
+                                        *out_of_scope_discarded += 1;
+                                    }
+                                    Err(_) => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Discovers RFC 9116 security policy endpoints at /.well-known/security.txt.
+    async fn discover_security_txt(
+        &self,
+        seed: &VerifiedScopeUrl,
+        discovered_map: &mut BTreeMap<String, DiscoveredEndpoint>,
+        out_of_scope_discarded: &mut usize,
+    ) -> Result<(), MapperError> {
+        let sec_candidate = match seed.as_url().join("/.well-known/security.txt") {
+            Ok(u) => u,
+            Err(_) => return Ok(()),
+        };
+
+        let verified_sec = match self.enforcer.validate_url(sec_candidate.as_str()) {
+            Ok(v) => v,
+            Err(_) => return Ok(()),
+        };
+
+        if let Ok(resp) = self.http_client.get(&verified_sec).await {
+            if resp.status_code == 200 {
+                let ct = resp.content_type().unwrap_or("").to_ascii_lowercase();
+                if let Ok(body_str) = resp.body_as_str() {
+                    let trimmed_body = body_str.trim_start().to_ascii_lowercase();
+                    let is_html = ct.contains("text/html")
+                        || trimmed_body.starts_with("<!doctype")
+                        || trimmed_body.starts_with("<html");
+
+                    if !is_html {
+                        let host = verified_sec.as_url().host_str().unwrap_or("").to_string();
+                        let path = verified_sec.as_url().path().to_string();
+                        let url_str = verified_sec.as_str().to_string();
+
+                        discovered_map.insert(
+                            url_str,
+                            DiscoveredEndpoint {
+                                url: verified_sec.as_str().to_string(),
+                                host,
+                                path,
+                                discovered_via: "security_txt".to_string(),
+                                status_code: Some(resp.status_code),
+                                response_size: Some(resp.body.len()),
+                                content_type: resp.content_type().map(|s| s.to_string()),
+                            },
+                        );
+
+                        let mut seen_sec_urls = HashSet::new();
+                        for line in body_str.lines() {
+                            let trimmed = line.trim();
+                            let lower = trimmed.to_ascii_lowercase();
+                            if lower.starts_with("policy:")
+                                || lower.starts_with("canonical:")
+                                || lower.starts_with("acknowledgments:")
+                            {
+                                let colon_idx = match trimmed.find(':') {
+                                    Some(i) => i,
+                                    None => continue,
+                                };
+                                let field_val = trimmed[colon_idx + 1..].trim();
+
+                                // 1. Relative paths starting with '/'
+                                if field_val.starts_with('/') {
+                                    let clean_path = field_val
+                                        .split_whitespace()
+                                        .next()
+                                        .unwrap_or(field_val)
+                                        .trim_end_matches(|c: char| {
+                                            c == '.'
+                                                || c == ','
+                                                || c == ';'
+                                                || c == ')'
+                                                || c == ']'
+                                                || c == '\''
+                                                || c == '"'
+                                        });
+
+                                    let mut resolved = match seed.as_url().join(clean_path) {
+                                        Ok(u) => u,
+                                        Err(_) => continue,
+                                    };
+                                    resolved.set_fragment(None);
+                                    let resolved_str = resolved.as_str().to_string();
+
+                                    if seen_sec_urls.insert(resolved_str.clone()) {
+                                        match self.enforcer.validate_url(&resolved_str) {
+                                            Ok(verified) => {
+                                                let h = verified
+                                                    .as_url()
+                                                    .host_str()
+                                                    .unwrap_or("")
+                                                    .to_string();
+                                                let p = verified.as_url().path().to_string();
+                                                let u = verified.as_str().to_string();
+
+                                                discovered_map.entry(u.clone()).or_insert_with(
+                                                    || DiscoveredEndpoint {
+                                                        url: u,
+                                                        host: h,
+                                                        path: p,
+                                                        discovered_via: "security_txt".to_string(),
+                                                        status_code: None,
+                                                        response_size: None,
+                                                        content_type: None,
+                                                    },
+                                                );
+                                            }
+                                            Err(ScopeError::DomainNotAllowed(_))
+                                            | Err(ScopeError::DomainExcluded(_))
+                                            | Err(ScopeError::PathExcluded(_)) => {
+                                                *out_of_scope_discarded += 1;
+                                            }
+                                            Err(_) => {}
+                                        }
+                                    }
+                                }
+
+                                // 2. Full http:// or https:// URIs
+                                for url_match in self.sec_url_regex.find_iter(field_val) {
+                                    let raw_url = url_match.as_str();
+                                    let clean_url = raw_url.trim_end_matches(|c: char| {
+                                        c == '.'
+                                            || c == ','
+                                            || c == ';'
+                                            || c == ')'
+                                            || c == ']'
+                                            || c == '\''
+                                            || c == '"'
+                                    });
+
+                                    if !seen_sec_urls.insert(clean_url.to_string()) {
+                                        continue;
+                                    }
+
+                                    match self.enforcer.validate_url(clean_url) {
+                                        Ok(verified) => {
+                                            let h = verified
+                                                .as_url()
+                                                .host_str()
+                                                .unwrap_or("")
+                                                .to_string();
+                                            let p = verified.as_url().path().to_string();
+                                            let u = verified.as_str().to_string();
+
+                                            discovered_map.entry(u.clone()).or_insert_with(|| {
+                                                DiscoveredEndpoint {
+                                                    url: u,
+                                                    host: h,
+                                                    path: p,
+                                                    discovered_via: "security_txt".to_string(),
+                                                    status_code: None,
+                                                    response_size: None,
+                                                    content_type: None,
+                                                }
+                                            });
+                                        }
+                                        Err(ScopeError::DomainNotAllowed(_))
+                                        | Err(ScopeError::DomainExcluded(_))
+                                        | Err(ScopeError::PathExcluded(_)) => {
+                                            *out_of_scope_discarded += 1;
+                                        }
+                                        Err(_) => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
     async fn discover_openapi_specs(
         &self,
         seed: &VerifiedScopeUrl,
@@ -732,5 +1290,380 @@ mod tests {
             .get_endpoints_for_program(&program_id)
             .expect("query endpoints failed");
         assert_eq!(stored_endpoints.len(), result.in_scope_count);
+    }
+
+    #[tokio::test]
+    async fn test_sitemap_xml_discovery_and_out_of_scope_filtering() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind failed");
+        let addr = listener.local_addr().expect("local_addr failed");
+        let port = addr.port();
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+
+                    let response = if req.contains("GET / ") {
+                        let html = "<!DOCTYPE html><html><body><h1>Sitemap Test</h1></body></html>";
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
+                            html.len(),
+                            html
+                        )
+                    } else if req.contains("GET /sitemap.xml ") {
+                        let sitemap = format!(
+                            r#"<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>http://127.0.0.1:{}/products</loc></url>
+  <url><loc>http://127.0.0.1:{}/about-us</loc></url>
+  <url><loc>http://127.0.0.1:{}/logout</loc></url>
+  <url><loc>https://external.example.com/external-blog</loc></url>
+</urlset>"#,
+                            port, port, port
+                        );
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\n\r\n{}",
+                            sitemap.len(),
+                            sitemap
+                        )
+                    } else {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+                    };
+
+                    let _ = socket.write_all(response.as_bytes()).await;
+                }
+            }
+        });
+
+        let storage = StorageEngine::open_in_memory().expect("storage open failed");
+        let mut config = test_scope_config(port);
+        config.excluded_paths = vec!["/logout".to_string()];
+        config.excluded_domains = vec!["external.example.com".to_string()];
+
+        let program_id = storage
+            .upsert_program_scope(&config)
+            .expect("upsert failed");
+        let enforcer = ScopeEnforcer::new(config).expect("enforcer failed");
+        let client =
+            ScopedHttpClient::new(storage.clone(), program_id.clone(), 50).expect("client failed");
+
+        let seed_url_str = format!("http://127.0.0.1:{}/", port);
+        let seed = enforcer
+            .validate_url(&seed_url_str)
+            .expect("seed validation failed");
+
+        let mapper = SurfaceMapper::new(&enforcer, &client, &storage, program_id.clone())
+            .expect("mapper creation failed");
+
+        let result = mapper.map(&seed).await.expect("map failed");
+
+        let sitemap_endpoints: Vec<&DiscoveredEndpoint> = result
+            .endpoints
+            .iter()
+            .filter(|e| e.discovered_via == "sitemap_xml")
+            .collect();
+
+        assert!(sitemap_endpoints.iter().any(|e| e.path == "/sitemap.xml"));
+        assert!(sitemap_endpoints.iter().any(|e| e.path == "/products"));
+        assert!(sitemap_endpoints.iter().any(|e| e.path == "/about-us"));
+        assert!(!sitemap_endpoints.iter().any(|e| e.path == "/logout"));
+        assert!(!sitemap_endpoints
+            .iter()
+            .any(|e| e.host == "external.example.com"));
+
+        assert!(result.out_of_scope_discarded >= 2);
+    }
+
+    #[tokio::test]
+    async fn test_security_txt_discovery_and_policy_extraction() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind failed");
+        let addr = listener.local_addr().expect("local_addr failed");
+        let port = addr.port();
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+
+                    let response = if req.contains("GET / ") {
+                        let html =
+                            "<!DOCTYPE html><html><body><h1>Security Test</h1></body></html>";
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
+                            html.len(),
+                            html
+                        )
+                    } else if req.contains("GET /.well-known/security.txt ") {
+                        let sec_txt = format!(
+                            "Contact: mailto:security@example.com\nPolicy: http://127.0.0.1:{}/security-policy\nCanonical: http://127.0.0.1:{}/.well-known/security.txt\nAcknowledgments: https://external.example.com/hall-of-fame\n",
+                            port, port
+                        );
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                            sec_txt.len(),
+                            sec_txt
+                        )
+                    } else {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+                    };
+
+                    let _ = socket.write_all(response.as_bytes()).await;
+                }
+            }
+        });
+
+        let storage = StorageEngine::open_in_memory().expect("storage open failed");
+        let mut config = test_scope_config(port);
+        config.excluded_domains = vec!["external.example.com".to_string()];
+
+        let program_id = storage
+            .upsert_program_scope(&config)
+            .expect("upsert failed");
+        let enforcer = ScopeEnforcer::new(config).expect("enforcer failed");
+        let client =
+            ScopedHttpClient::new(storage.clone(), program_id.clone(), 50).expect("client failed");
+
+        let seed_url_str = format!("http://127.0.0.1:{}/", port);
+        let seed = enforcer
+            .validate_url(&seed_url_str)
+            .expect("seed validation failed");
+
+        let mapper = SurfaceMapper::new(&enforcer, &client, &storage, program_id.clone())
+            .expect("mapper creation failed");
+
+        let result = mapper.map(&seed).await.expect("map failed");
+
+        let sec_endpoints: Vec<&DiscoveredEndpoint> = result
+            .endpoints
+            .iter()
+            .filter(|e| e.discovered_via == "security_txt")
+            .collect();
+
+        assert!(sec_endpoints
+            .iter()
+            .any(|e| e.path == "/.well-known/security.txt"));
+        assert!(sec_endpoints.iter().any(|e| e.path == "/security-policy"));
+        assert!(!sec_endpoints
+            .iter()
+            .any(|e| e.host == "external.example.com"));
+
+        assert!(result.out_of_scope_discarded >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_source_map_inspection_and_out_of_scope_cdn_fail_closed() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind failed");
+        let addr = listener.local_addr().expect("local_addr failed");
+        let port = addr.port();
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+
+                    let response = if req.contains("GET / ") {
+                        let html = r#"<!DOCTYPE html>
+<html>
+<head>
+    <script src="/static/bundle.js"></script>
+</head>
+<body>
+    <script>
+        // Inline script referencing an out-of-scope CDN source map
+        //# sourceMappingURL=https://external.example.com/cdn/bundle.js.map
+    </script>
+</body>
+</html>"#;
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
+                            html.len(),
+                            html
+                        )
+                    } else if req.contains("GET /static/bundle.js ") {
+                        let js = r#"
+                        function calculate() { return 42; }
+                        //# sourceMappingURL=bundle.js.map
+                        "#;
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nContent-Length: {}\r\n\r\n{}",
+                            js.len(),
+                            js
+                        )
+                    } else if req.contains("GET /static/bundle.js.map ") {
+                        let map = r#"{
+                            "version": 3,
+                            "sources": [
+                                "/api/v2/internal-metrics",
+                                "/api/v1/excluded-admin"
+                            ],
+                            "mappings": "AAAA",
+                            "sourcesContent": [
+                                "const hiddenRoute = '/graphql';"
+                            ]
+                        }"#;
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            map.len(),
+                            map
+                        )
+                    } else {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+                    };
+
+                    let _ = socket.write_all(response.as_bytes()).await;
+                }
+            }
+        });
+
+        let storage = StorageEngine::open_in_memory().expect("storage open failed");
+        let mut config = test_scope_config(port);
+        config.excluded_paths = vec!["/api/v1/excluded-admin".to_string()];
+        config.excluded_domains = vec!["external.example.com".to_string()];
+
+        let program_id = storage
+            .upsert_program_scope(&config)
+            .expect("upsert failed");
+        let enforcer = ScopeEnforcer::new(config).expect("enforcer failed");
+        let client =
+            ScopedHttpClient::new(storage.clone(), program_id.clone(), 50).expect("client failed");
+
+        let seed_url_str = format!("http://127.0.0.1:{}/", port);
+        let seed = enforcer
+            .validate_url(&seed_url_str)
+            .expect("seed validation failed");
+
+        let mapper = SurfaceMapper::new(&enforcer, &client, &storage, program_id.clone())
+            .expect("mapper creation failed");
+
+        let result = mapper.map(&seed).await.expect("map failed");
+
+        let map_endpoints: Vec<&DiscoveredEndpoint> = result
+            .endpoints
+            .iter()
+            .filter(|e| e.discovered_via == "source_map")
+            .collect();
+
+        assert!(map_endpoints
+            .iter()
+            .any(|e| e.path == "/static/bundle.js.map"));
+        assert!(map_endpoints
+            .iter()
+            .any(|e| e.path == "/api/v2/internal-metrics"));
+        assert!(map_endpoints.iter().any(|e| e.path == "/graphql"));
+        assert!(!map_endpoints
+            .iter()
+            .any(|e| e.path == "/api/v1/excluded-admin"));
+        assert!(!result
+            .endpoints
+            .iter()
+            .any(|e| e.host == "external.example.com"));
+
+        assert!(result.out_of_scope_discarded >= 2);
+    }
+
+    #[tokio::test]
+    async fn test_js_subdomain_and_wildcard_scope_discovery() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind failed");
+        let addr = listener.local_addr().expect("local_addr failed");
+        let port = addr.port();
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+
+                    let response = if req.contains("GET / ") {
+                        let html = r#"<!DOCTYPE html>
+<html>
+<head>
+    <script src="/static/app.js"></script>
+</head>
+<body>
+    <p>Landing page with embedded subdomain references</p>
+</body>
+</html>"#;
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
+                            html.len(),
+                            html
+                        )
+                    } else if req.contains("GET /static/app.js ") {
+                        let js = r#"
+                        const apiHost = "https://api.localtest.invalid/v1/users";
+                        const telemetryHost = "https://telemetry.localtest.invalid/v2/events";
+                        const authHost = "https://auth.localtest.invalid/oauth/token";
+                        const unauthorizedHost = "https://unauthorized.external.com/telemetry";
+                        "#;
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nContent-Length: {}\r\n\r\n{}",
+                            js.len(),
+                            js
+                        )
+                    } else {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+                    };
+
+                    let _ = socket.write_all(response.as_bytes()).await;
+                }
+            }
+        });
+
+        let storage = StorageEngine::open_in_memory().expect("storage open failed");
+        let mut config = test_scope_config(port);
+        config
+            .allowed_domains
+            .push("*.localtest.invalid".to_string());
+        config
+            .excluded_domains
+            .push("auth.localtest.invalid".to_string());
+
+        let program_id = storage
+            .upsert_program_scope(&config)
+            .expect("upsert failed");
+        let enforcer = ScopeEnforcer::new(config).expect("enforcer failed");
+        let client =
+            ScopedHttpClient::new(storage.clone(), program_id.clone(), 50).expect("client failed");
+
+        let seed_url_str = format!("http://127.0.0.1:{}/", port);
+        let seed = enforcer
+            .validate_url(&seed_url_str)
+            .expect("seed validation failed");
+
+        let mapper = SurfaceMapper::new(&enforcer, &client, &storage, program_id.clone())
+            .expect("mapper creation failed");
+
+        let result = mapper.map(&seed).await.expect("map failed");
+
+        let js_subdomain_endpoints: Vec<&DiscoveredEndpoint> = result
+            .endpoints
+            .iter()
+            .filter(|e| e.discovered_via == "js_subdomain")
+            .collect();
+
+        assert!(js_subdomain_endpoints
+            .iter()
+            .any(|e| e.url == "https://api.localtest.invalid/v1/users"));
+        assert!(js_subdomain_endpoints
+            .iter()
+            .any(|e| e.url == "https://telemetry.localtest.invalid/v2/events"));
+
+        assert!(!result
+            .endpoints
+            .iter()
+            .any(|e| e.host == "auth.localtest.invalid"));
+        assert!(!result
+            .endpoints
+            .iter()
+            .any(|e| e.host == "unauthorized.external.com"));
+
+        assert!(result.out_of_scope_discarded >= 2);
     }
 }
