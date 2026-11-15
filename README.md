@@ -1,6 +1,6 @@
 # BountyScope
 
-[![Version](https://img.shields.io/badge/version-0.15.2-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.15.3-blue.svg)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
 BountyScope is a scope-locked reconnaissance, passive policy auditing, and Model Context Protocol (MCP) triage command-line interface written in Rust. It is engineered for authorized bug bounty programs, defensive security reviews, and vulnerability disclosure assessments. The system guarantees strict scope boundaries, non-destructive policy evaluation, deterministic rate limiting, and compile-time target verification before executing any network interactions.
@@ -263,12 +263,12 @@ Similarly, `--output` on `report` and `scan` defaults to `data/<sanitized_progra
 | Command | Purpose | Input Flags | Output |
 |---|---|---|---|
 | `validate-scope` | Verifies YAML syntax and scope boundary integrity. | `[--config]` | Console validation summary |
-| `scan` | Unified pipeline: maps surface, audits endpoints, and exports report. | `--url`, `[--config]`, `[--db]`, `[--output]` | SQLite database and Markdown report |
+| `scan` | Unified pipeline: maps surface, audits endpoints, and exports report. | `--url`, `[--config]`, `[--db]`, `[--output]`, `[--format]` | SQLite database and Assessment report (`md`, `json`, `sarif`) |
 | `probe` | Safely evaluates and probes a single in-scope URL. | `--url`, `[--config]`, `[--db]` | HTTP status, headers, audit log entry |
 | `map` | Passively extracts links, scripts, source maps, sitemaps, security policies, and API specs from a seed URL. | `--url`, `[--config]`, `[--db]` | Discovered endpoints in SQLite |
 | `audit` | Evaluates HTTP headers, CORS policies, and spec disclosures. | `[--config]`, `[--db]` | Audit findings summary |
-| `report` | Generates a Markdown assessment report with findings and evidence. | `[--config]`, `[--db]`, `[--output]`, `[--stdout]` | Markdown report (file or stdout) |
-| `diff` | Compares historical scan snapshots to identify regressions, status transitions, and surface deltas. | `[--config]`, `[--db]`, `[--from]`, `[--to]`, `[--output]`, `[--stdout]` | Markdown diff report (file or stdout) |
+| `report` | Generates assessment reports in Markdown, JSON, or OASIS SARIF v2.1.0 format. | `[--config]`, `[--db]`, `[--output]`, `[--stdout]`, `[--format]` | Assessment report (`md`, `json`, or `sarif`) |
+| `diff` | Compares historical scan snapshots to identify regressions, status transitions, and surface deltas. | `[--config]`, `[--db]`, `[--from]`, `[--to]`, `[--output]`, `[--stdout]`, `[--format]` | Diff report (`md` or `json`) |
 | `mcp` | Launches the Model Context Protocol server over standard I/O (`stdio`). | `[--config]`, `[--db]` | JSON-RPC 2.0 protocol on stdout |
 
 ### Lifecycle & State Modifications (What Changes on Each Run)
@@ -396,14 +396,53 @@ Audit completed for program 'example-security-program': 9 endpoints audited, 6 t
   INFO:     1
 ```
 
-### 6. Generate Assessment Markdown Report
+### 6. Generate Assessment Reports (`--format md | json | sarif`)
+
+BountyScope supports multi-format report exports via `--format`:
+- **`md` (Default):** Human-readable GitHub-Flavored Markdown report with executive metrics, evidence snippets, and remediation tables.
+- **`json`:** Strongly typed machine-readable JSON object containing tool metadata, program scope rules, summary metrics, mapped endpoints, and security findings.
+- **`sarif`:** Standard OASIS SARIF v2.1.0 (`https://json.schemastore.org/sarif-2.1.0.json`) JSON with deduplicated driver rules and mapped severity levels (`CRITICAL`/`HIGH` -> `error`, `MEDIUM` -> `warning`, `LOW`/`INFO` -> `note`) ready for direct upload into GitHub Code Scanning.
 
 ```bash
 # Output defaults to data/example_security_program_report.md
 bountyscope report --config configs/scope.example.yaml
 
-# Or print directly to standard output
-bountyscope report --config configs/scope.example.yaml --stdout
+# Generate OASIS SARIF v2.1.0 report (defaults to data/<program>_report.sarif)
+bountyscope report --config configs/scope.example.yaml --format sarif
+
+# Stream machine-readable JSON to standard output for jq processing
+bountyscope report --config configs/scope.example.yaml --format json --stdout | jq '.summary'
+```
+
+#### GitHub Code Scanning & CI/CD Integration
+
+Export SARIF directly during pull requests or automated releases and ingest security findings into GitHub's Security tab:
+
+```yaml
+name: BountyScope Assessment
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  security-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install BountyScope
+        run: cargo install --path .
+      - name: Execute Assessment Scan
+        run: |
+          bountyscope scan \
+            --url https://staging.example.com/ \
+            --config configs/scope.production.yaml \
+            --format sarif \
+            --output results.sarif
+      - name: Upload Findings to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif
 ```
 
 ### 7. Historical Regression & Attack Surface Diffing (`bountyscope diff`)

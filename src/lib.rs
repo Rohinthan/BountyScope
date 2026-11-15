@@ -13,7 +13,7 @@ pub use error::{
 pub use http::{HttpProbeResponse, ScopedHttpClient, MAX_RESPONSE_BODY_BYTES};
 pub use mapper::{DiscoveredEndpoint, SurfaceMapResult, SurfaceMapper};
 pub use mcp::BountyScopeMcpServer;
-pub use report::ReportGenerator;
+pub use report::{ReportFormat, ReportGenerator};
 pub use scope::{normalize_path, ScopeConfig, ScopeEnforcer, VerifiedScopeUrl};
 pub use storage::{
     AuditLogEntry, AuditLogRecord, DiffFindingItem, EndpointEntry, EndpointRecord,

@@ -1,6 +1,6 @@
 # BountyScope Consolidated Technical Reference
 
-**Document Version:** 0.15.2  
+**Document Version:** 0.15.3  
 **Specification Level:** Final Technical Reference  
 **Applicability:** `bountyscope` CLI and Core Subsystems  
 
@@ -334,7 +334,11 @@ BountyScope enforces database migrations deterministically using SQLite's native
 
 - **Environment Variable Fallback:** All subcommands accept `BOUNTYSCOPE_CONFIG` as a fallback when `--config` is omitted.
 - **Deterministic Database Path:** When `--db` is omitted, BountyScope derives `data/<sanitized_program_name>.db` (sanitizing non-alphanumeric characters to `_`) and automatically creates parent directories via `std::fs::create_dir_all`.
-- **Deterministic Report Path:** When `--output` is omitted, `report` and `scan` default to `data/<sanitized_program_name>_report.md`. A `--stdout` flag is available on `report` for pipeline redirection.
+- **Multi-Format Export & Deterministic Report Paths:** `scan`, `report`, and `diff` accept `--format md | json | sarif` (defaulting to `md`). When `--output` is omitted, the filename extension is automatically derived from the format:
+  - `md` -> `data/<sanitized_program_name>_report.md` (or `_diff.md`)
+  - `json` -> `data/<sanitized_program_name>_report.json` (or `_diff.json`)
+  - `sarif` -> `data/<sanitized_program_name>_report.sarif`
+- **Standard Output Streaming:** A `--stdout` flag is available on `report` and `diff` for shell piping, CI/CD parsing, and `jq` manipulation without filesystem side effects.
 
 ### Subcommand Reference
 
@@ -343,7 +347,7 @@ BountyScope enforces database migrations deterministically using SQLite's native
 bountyscope validate-scope [--config <path>]
 
 # 2. Unified assessment scan (map -> audit -> report)
-bountyscope scan --url <seed_url> [--config <path>] [--db <path>] [--output <file.md>]
+bountyscope scan --url <seed_url> [--config <path>] [--db <path>] [--output <file>] [--format md|json|sarif]
 
 # 3. Probe single target endpoint
 bountyscope probe --url <target_url> [--config <path>] [--db <path>]
@@ -354,15 +358,30 @@ bountyscope map --url <seed_url> [--config <path>] [--db <path>]
 # 5. Audit security posture of mapped endpoints
 bountyscope audit [--config <path>] [--db <path>]
 
-# 6. Generate Markdown assessment report
-bountyscope report [--config <path>] [--db <path>] [--output <file.md>] [--stdout]
+# 6. Generate assessment report in Markdown, JSON, or SARIF v2.1.0
+bountyscope report [--config <path>] [--db <path>] [--output <file>] [--stdout] [--format md|json|sarif]
 
-# 7. Compare scan snapshots and track regressions
-bountyscope diff [--config <path>] [--db <path>] [--from <run_id>] [--to <run_id>] [--output <file.md>] [--stdout]
+# 7. Compare scan snapshots and track regressions (Markdown or JSON)
+bountyscope diff [--config <path>] [--db <path>] [--from <run_id>] [--to <run_id>] [--output <file>] [--stdout] [--format md|json]
 
 # 8. Start Model Context Protocol (MCP) server
 bountyscope mcp [--config <path>] [--db <path>]
 ```
+
+### Machine-Readable Emitters: JSON & OASIS SARIF v2.1.0
+
+BountyScope features two standardized machine-readable exporters:
+1. **Structured JSON (`--format json`):**
+   - Outputs a clean JSON schema with root keys: `schema_version`, `tool` (`name`, `version`), `program` (scope and attribution parameters), `summary` (total counts and severity distribution), `endpoints` (detailed surface inventory), and `findings` (containing parsed evidence objects and remediation).
+   - Also implemented for `bountyscope diff --format json`, rendering structured regression metrics, endpoint additions/removals, status transitions, and newly identified security issues.
+2. **OASIS SARIF v2.1.0 (`--format sarif`):**
+   - Implements OASIS Static Analysis Results Interchange Format (version 2.1.0) conforming to `https://json.schemastore.org/sarif-2.1.0.json`.
+   - Driver Component: `runs[0].tool.driver` contains name `"BountyScope"`, version `"0.15.3"`, information URI, and deduplicated `rules[]` entries with title descriptions, full descriptions, and remediation guidance.
+   - Severity-to-Level Mapping:
+     - `CRITICAL` / `HIGH` -> `"error"` (`security-severity: "9.0"` / `"7.0"`)
+     - `MEDIUM` -> `"warning"` (`security-severity: "5.0"`)
+     - `LOW` / `INFO` -> `"note"` (`security-severity: "3.0"` / `"1.0"`)
+   - Location Anchoring: Findings map `locations[0].physicalLocation.artifactLocation.uri` directly to the affected endpoint URL for automatic PR annotations when uploaded via `github/codeql-action/upload-sarif`.
 
 ### Native Model Context Protocol (MCP) Server
 

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use bountyscope::http::ScopedHttpClient;
 use bountyscope::mapper::SurfaceMapper;
 use bountyscope::mcp::BountyScopeMcpServer;
-use bountyscope::report::ReportGenerator;
+use bountyscope::report::{ReportFormat, ReportGenerator};
 use bountyscope::scope::{ScopeConfig, ScopeEnforcer};
 use bountyscope::storage::StorageEngine;
 use bountyscope::verifier::SafeVerificationRunner;
@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "bountyscope")]
-#[command(version = "0.15.2")]
+#[command(version = "0.15.3")]
 #[command(
     about = "Automated vulnerability surface mapping and passive policy verification engine",
     long_about = "BountyScope is an automated vulnerability surface mapping and passive policy verification engine designed for authorized security assessments and bug bounty programs."
@@ -55,9 +55,13 @@ enum Commands {
         #[arg(short, long)]
         db: Option<PathBuf>,
 
-        /// Output file path for Markdown report (defaults to data/<program_name>_report.md)
+        /// Output file path for assessment report (defaults to data/<program_name>_report.<ext>)
         #[arg(short, long)]
         output: Option<PathBuf>,
+
+        /// Report output format (md | json | sarif)
+        #[arg(long, value_enum, default_value_t = ReportFormat::Md)]
+        format: ReportFormat,
     },
 
     /// Safely probe an in-scope URL, enforcing rate limits and recording audit logs
@@ -116,7 +120,7 @@ enum Commands {
         db: Option<PathBuf>,
     },
 
-    /// Generate an assessment Markdown report from stored audit findings
+    /// Generate an assessment report from stored audit findings
     Report {
         /// Path to scope configuration YAML file
         #[arg(
@@ -131,13 +135,17 @@ enum Commands {
         #[arg(short, long)]
         db: Option<PathBuf>,
 
-        /// Output file path for Markdown report (defaults to data/<program_name>_report.md unless --stdout is set)
+        /// Output file path for assessment report (defaults to data/<program_name>_report.<ext> unless --stdout is set)
         #[arg(short, long)]
         output: Option<PathBuf>,
 
         /// Print report directly to standard output
         #[arg(long, default_value_t = false)]
         stdout: bool,
+
+        /// Report output format (md | json | sarif)
+        #[arg(long, value_enum, default_value_t = ReportFormat::Md)]
+        format: ReportFormat,
     },
 
     /// Compare historical scan snapshots and identify attack surface regressions
@@ -163,13 +171,17 @@ enum Commands {
         #[arg(long)]
         to: Option<i64>,
 
-        /// Output file path for Markdown diff report (defaults to data/<program_name>_diff.md unless --stdout is set)
+        /// Output file path for diff report (defaults to data/<program_name>_diff.<ext> unless --stdout is set)
         #[arg(short, long)]
         output: Option<PathBuf>,
 
         /// Print diff report directly to standard output
         #[arg(long, default_value_t = false)]
         stdout: bool,
+
+        /// Diff report output format (md | json)
+        #[arg(long, value_enum, default_value_t = ReportFormat::Md)]
+        format: ReportFormat,
     },
 
     /// Serve native Model Context Protocol (MCP) server over stdio
@@ -208,7 +220,8 @@ async fn main() -> Result<()> {
             config,
             db,
             output,
-        }) => execute_scan(&config, &url, &db, &output).await,
+            format,
+        }) => execute_scan(&config, &url, &db, &output, format).await,
         Some(Commands::Probe { config, url, db }) => execute_probe(&config, &url, &db).await,
         Some(Commands::Map { config, url, db }) => execute_map(&config, &url, &db).await,
         Some(Commands::Audit { config, db }) => execute_audit(&config, &db).await,
@@ -217,7 +230,8 @@ async fn main() -> Result<()> {
             db,
             output,
             stdout,
-        }) => execute_report(&config, &db, &output, stdout),
+            format,
+        }) => execute_report(&config, &db, &output, stdout, format),
         Some(Commands::Diff {
             config,
             db,
@@ -225,10 +239,11 @@ async fn main() -> Result<()> {
             to,
             output,
             stdout,
-        }) => execute_diff(&config, &db, from, to, &output, stdout).await,
+            format,
+        }) => execute_diff(&config, &db, from, to, &output, stdout, format).await,
         Some(Commands::Mcp { config, db }) => execute_mcp(&config, &db).await,
         None => {
-            println!("BountyScope v0.15.2 - Vulnerability Surface Mapping Engine");
+            println!("BountyScope v0.15.3 - Vulnerability Surface Mapping Engine");
             println!("Run 'bountyscope --help' for available commands.");
             Ok(())
         }
@@ -268,6 +283,7 @@ fn resolve_report_output_path(
     output_arg: &Option<PathBuf>,
     program_name: &str,
     stdout: bool,
+    format: ReportFormat,
 ) -> Result<Option<PathBuf>> {
     if stdout {
         return Ok(None);
@@ -276,7 +292,8 @@ fn resolve_report_output_path(
         Some(p) => p.clone(),
         None => {
             let sanitized = sanitize_name(program_name);
-            PathBuf::from(format!("data/{sanitized}_report.md"))
+            let ext = format.extension();
+            PathBuf::from(format!("data/{sanitized}_report.{ext}"))
         }
     };
     if let Some(parent) = path.parent() {
@@ -292,15 +309,23 @@ fn resolve_diff_output_path(
     output_arg: &Option<PathBuf>,
     program_name: &str,
     stdout: bool,
+    format: ReportFormat,
 ) -> Result<Option<PathBuf>> {
     if stdout {
         return Ok(None);
     }
+    let ext = match format {
+        ReportFormat::Md => "md",
+        ReportFormat::Json => "json",
+        ReportFormat::Sarif => {
+            anyhow::bail!("SARIF format is not supported for diff reports. Use 'md' or 'json'.");
+        }
+    };
     let path = match output_arg {
         Some(p) => p.clone(),
         None => {
             let sanitized = sanitize_name(program_name);
-            PathBuf::from(format!("data/{sanitized}_diff.md"))
+            PathBuf::from(format!("data/{sanitized}_diff.{ext}"))
         }
     };
     if let Some(parent) = path.parent() {
@@ -339,6 +364,7 @@ async fn execute_scan(
     url_str: &str,
     db_arg: &Option<PathBuf>,
     output_arg: &Option<PathBuf>,
+    format: ReportFormat,
 ) -> Result<()> {
     let config = ScopeConfig::from_file(config_path)
         .with_context(|| format!("Failed to load scope configuration from {:?}", config_path))?;
@@ -417,9 +443,10 @@ async fn execute_scan(
         .with_context(|| "Failed to query findings from database")?;
 
     let report_content =
-        ReportGenerator::generate_markdown(&program, &config, &endpoints, &findings);
+        ReportGenerator::render_report(format, &program, &config, &endpoints, &findings)
+            .with_context(|| "Failed to render assessment report")?;
 
-    let out_path = resolve_report_output_path(output_arg, &config.program_name, false)?
+    let out_path = resolve_report_output_path(output_arg, &config.program_name, false, format)?
         .context("Report output path resolution failed")?;
 
     ReportGenerator::write_to_file(&report_content, &out_path)
@@ -596,6 +623,7 @@ fn execute_report(
     db_arg: &Option<PathBuf>,
     output_arg: &Option<PathBuf>,
     stdout: bool,
+    format: ReportFormat,
 ) -> Result<()> {
     let config = ScopeConfig::from_file(config_path)
         .with_context(|| format!("Failed to load scope configuration from {:?}", config_path))?;
@@ -617,9 +645,10 @@ fn execute_report(
         .with_context(|| "Failed to query findings from database")?;
 
     let report_content =
-        ReportGenerator::generate_markdown(&program, &config, &endpoints, &findings);
+        ReportGenerator::render_report(format, &program, &config, &endpoints, &findings)
+            .with_context(|| "Failed to render assessment report")?;
 
-    match resolve_report_output_path(output_arg, &config.program_name, stdout)? {
+    match resolve_report_output_path(output_arg, &config.program_name, stdout, format)? {
         Some(out_path) => {
             ReportGenerator::write_to_file(&report_content, &out_path)
                 .with_context(|| format!("Failed to write report to {:?}", out_path))?;
@@ -640,6 +669,7 @@ async fn execute_diff(
     to_arg: Option<i64>,
     output_arg: &Option<PathBuf>,
     stdout: bool,
+    format: ReportFormat,
 ) -> Result<()> {
     let config = ScopeConfig::from_file(config_path)
         .with_context(|| format!("Failed to load scope configuration from {:?}", config_path))?;
@@ -700,9 +730,10 @@ async fn execute_diff(
             .with_context(|| "Failed to compute diff between latest scan runs")?,
     };
 
-    let report_content = ReportGenerator::generate_diff_markdown(&diff);
+    let report_content = ReportGenerator::render_diff(format, &diff)
+        .with_context(|| "Failed to render diff report")?;
 
-    match resolve_diff_output_path(output_arg, &config.program_name, stdout)? {
+    match resolve_diff_output_path(output_arg, &config.program_name, stdout, format)? {
         Some(out_path) => {
             ReportGenerator::write_to_file(&report_content, &out_path)
                 .with_context(|| format!("Failed to write diff report to {:?}", out_path))?;

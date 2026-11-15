@@ -124,6 +124,12 @@ pub enum ReportError {
 
     #[error("Program not found: {0}")]
     ProgramNotFound(String),
+
+    #[error("JSON serialization error during report generation: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("Unsupported report format: {0}")]
+    UnsupportedFormat(String),
 }
 
 /// Structured errors for Model Context Protocol (MCP) server operations.
