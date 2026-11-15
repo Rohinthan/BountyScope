@@ -1,6 +1,6 @@
 # BountyScope
 
-[![Version](https://img.shields.io/badge/version-0.14.0-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.14.1-blue.svg)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
 BountyScope is a scope-locked reconnaissance, passive policy auditing, and Model Context Protocol (MCP) triage command-line interface written in Rust. It is engineered for authorized bug bounty programs, defensive security reviews, and vulnerability disclosure assessments. The system guarantees strict scope boundaries, non-destructive policy evaluation, deterministic rate limiting, and compile-time target verification before executing any network interactions.
@@ -466,6 +466,25 @@ docker compose down
 ```
 
 See [Doc/04_LOCAL_LAB_GUIDE.md](Doc/04_LOCAL_LAB_GUIDE.md) for complete details on lab architecture and target endpoints.
+
+---
+
+## Threat Model & Operational Boundaries
+
+BountyScope is designed under a defense-in-depth safety paradigm that enforces strict operational boundaries directly in software architecture:
+
+### Built-in System Guarantees
+
+1. **Compile-Time Scope Enforcement (`VerifiedScopeUrl`):** All outbound network requests require a `VerifiedScopeUrl` token with a private constructor only mintable by `ScopeEnforcer::validate_url()`.
+2. **Non-Redirecting Transport (`Policy::none()`):** HTTP 3xx redirects are captured passively as surface discovery telemetry rather than followed automatically, preventing hostile redirect chains outside scope boundaries.
+3. **Rate-Limited, Non-Destructive `GET`-Only Requests:** Requests are throttled via `rate_limit_rps`. HTTP 429/503 responses trigger bounded exponential backoff or numeric `Retry-After` handling (max 5s, max 2 retries) with audit logging.
+4. **Streamed Payload Ceiling (`5 MiB`):** Responses are streamed up to 5 MiB (`MAX_RESPONSE_BODY_BYTES`), aborting on oversize payloads to prevent memory exhaustion.
+
+### Operator Responsibilities & Operational Limitations
+
+- **Non-RESTful State Changes on HTTP `GET`:** Poorly designed applications may execute state changes on `GET` requests. Operators must configure sensitive paths (e.g., `/logout`, `/admin/delete`) under `excluded_paths`.
+- **Hostname Validation Prior to DNS Resolution:** Scope checking operates on URL hostnames and lexical IP strings prior to socket resolution. Environments with untrusted, dynamic, or user-controlled DNS may be vulnerable to DNS rebinding / TOCTOU unless DNS pinning or trusted upstream resolvers are employed.
+- **Passive Inspection vs. Active Exploitation:** The engine performs passive analysis, metadata extraction, and policy auditing. It does not exploit vulnerabilities, fuzz inputs, or execute state-changing attacks.
 
 ---
 

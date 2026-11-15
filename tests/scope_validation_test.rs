@@ -141,3 +141,54 @@ safe_mode: false
         Err(ScopeError::InvalidConfiguration(_))
     ));
 }
+
+#[test]
+fn test_adversarial_scope_edge_cases_fail_closed() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let example_path = manifest_dir.join("configs/scope.example.yaml");
+
+    let config = ScopeConfig::from_file(&example_path)
+        .unwrap_or_else(|err| panic!("configs/scope.example.yaml must load cleanly: {err}"));
+    let enforcer = ScopeEnforcer::new(config)
+        .unwrap_or_else(|err| panic!("ScopeEnforcer failed initialization: {err}"));
+
+    // 1. Credentialed authority confusion:
+    // Host must resolve to evil.com, not allowed.example.com, and must fail-closed as DomainNotAllowed
+    let auth_conf_1 = enforcer.validate_url("https://allowed.example.com@evil.com/");
+    assert!(matches!(auth_conf_1, Err(ScopeError::DomainNotAllowed(d)) if d == "evil.com"));
+
+    let auth_conf_2 = enforcer.validate_url("https://user:pass@evil.com/");
+    assert!(matches!(auth_conf_2, Err(ScopeError::DomainNotAllowed(d)) if d == "evil.com"));
+
+    // 2. Subdomain suffix / prefix tricks:
+    // Suffix trick: allowed.example.com.evil.com
+    let suffix_trick = enforcer.validate_url("https://allowed.example.com.evil.com/");
+    assert!(
+        matches!(suffix_trick, Err(ScopeError::DomainNotAllowed(d)) if d == "allowed.example.com.evil.com")
+    );
+
+    // Prefix trick: myexample.com (when example.com and *.example.com are allowed)
+    let prefix_trick = enforcer.validate_url("https://myexample.com/");
+    assert!(matches!(prefix_trick, Err(ScopeError::DomainNotAllowed(d)) if d == "myexample.com"));
+
+    // 3. Double-encoded and mixed path traversal targeting excluded paths (/logout):
+    let double_encoded = enforcer.validate_url("https://example.com/%252e%252e/logout");
+    assert!(matches!(double_encoded, Err(ScopeError::PathExcluded(p)) if p == "/logout"));
+
+    let mixed_traversal = enforcer.validate_url("https://example.com/a/b/../../logout");
+    assert!(matches!(mixed_traversal, Err(ScopeError::PathExcluded(p)) if p == "/logout"));
+
+    // 4. Private, link-local, and loopback IP rejection when not in allowed_domains:
+    // (Note: 127.0.0.1 is in scope in example.yaml, but link-local 169.254.169.254, 10.0.0.1, and [::1] are not)
+    let aws_meta = enforcer.validate_url("http://169.254.169.254/latest/meta-data/");
+    assert!(matches!(aws_meta, Err(ScopeError::DomainNotAllowed(d)) if d == "169.254.169.254"));
+
+    let rfc1918 = enforcer.validate_url("http://10.0.0.1/");
+    assert!(matches!(rfc1918, Err(ScopeError::DomainNotAllowed(d)) if d == "10.0.0.1"));
+
+    let ipv6_loopback = enforcer.validate_url("http://[::1]/");
+    assert!(matches!(
+        ipv6_loopback,
+        Err(ScopeError::DomainNotAllowed(_))
+    ));
+}

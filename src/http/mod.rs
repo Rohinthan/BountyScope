@@ -107,134 +107,182 @@ impl ScopedHttpClient {
 
     /// Dispatches a safe, rate-limited GET request to a verified target URL with custom headers.
     ///
+    /// Dispatches a safe, rate-limited GET request to a verified target URL with custom headers.
+    ///
     /// Useful for passive auditing checks such as CORS origin reflection probes.
     pub async fn get_with_headers(
         &self,
         target: &VerifiedScopeUrl,
         headers: &[(&str, &str)],
     ) -> Result<HttpProbeResponse, HttpError> {
-        let mut limiter = self.rate_limiter.lock().await;
+        const MAX_RATE_LIMIT_RETRIES: u32 = 2;
+        const MAX_RETRY_AFTER_SECS: u64 = 5;
+
         let mut was_rate_limited = false;
 
-        if let Some(last) = limiter.last_request_instant {
-            let elapsed = last.elapsed();
-            if elapsed < self.min_interval {
-                let delay = self.min_interval - elapsed;
-                was_rate_limited = true;
-                tokio::time::sleep(delay).await;
-            }
-        }
+        for attempt in 0..=MAX_RATE_LIMIT_RETRIES {
+            let mut limiter = self.rate_limiter.lock().await;
 
-        limiter.last_request_instant = Some(Instant::now());
-        drop(limiter);
-
-        let mut req_builder = self.client.get(target.as_str());
-        if let Some(handle) = &self.researcher_handle {
-            req_builder = req_builder.header("X-Bug-Bounty", handle);
-        }
-        for (name, val) in headers {
-            req_builder = req_builder.header(*name, *val);
-        }
-
-        let start_time = std::time::Instant::now();
-        let request_result = req_builder.send().await;
-        let duration_ms = start_time.elapsed().as_millis() as u64;
-
-        match request_result {
-            Ok(mut resp) => {
-                let status_code = resp.status().as_u16();
-
-                // Capture redirect location header if present (301, 302, 307, 308)
-                let redirect_location = resp
-                    .headers()
-                    .get(reqwest::header::LOCATION)
-                    .and_then(|val| val.to_str().ok().map(|s| s.to_string()));
-
-                let mut headers = Vec::new();
-                for (name, val) in resp.headers() {
-                    if let Ok(v) = val.to_str() {
-                        headers.push((name.as_str().to_string(), v.to_string()));
-                    }
+            if let Some(last) = limiter.last_request_instant {
+                let elapsed = last.elapsed();
+                if elapsed < self.min_interval {
+                    let delay = self.min_interval - elapsed;
+                    was_rate_limited = true;
+                    tokio::time::sleep(delay).await;
                 }
+            }
 
-                // Enforce maximum payload size limit on Content-Length header if available
-                if let Some(content_length) = resp.content_length() {
-                    if content_length > MAX_RESPONSE_BODY_BYTES as u64 {
+            limiter.last_request_instant = Some(Instant::now());
+            drop(limiter);
+
+            let mut req_builder = self.client.get(target.as_str());
+            if let Some(handle) = &self.researcher_handle {
+                req_builder = req_builder.header("X-Bug-Bounty", handle);
+            }
+            for (name, val) in headers {
+                req_builder = req_builder.header(*name, *val);
+            }
+
+            let start_time = std::time::Instant::now();
+            let request_result = req_builder.send().await;
+            let duration_ms = start_time.elapsed().as_millis() as u64;
+
+            match request_result {
+                Ok(mut resp) => {
+                    let status_code = resp.status().as_u16();
+
+                    if status_code == 429 || status_code == 503 {
+                        was_rate_limited = true;
                         let audit_entry = AuditLogEntry {
                             program_id: self.program_id.clone(),
                             target_url: target.as_str().to_string(),
                             http_method: "GET".to_string(),
                             status_code: Some(status_code),
                             duration_ms,
-                            rate_limited: was_rate_limited,
+                            rate_limited: true,
                         };
                         self.storage.record_audit_log(&audit_entry)?;
-                        return Err(HttpError::PayloadTooLarge(
-                            content_length as usize,
-                            MAX_RESPONSE_BODY_BYTES,
-                        ));
+
+                        if attempt < MAX_RATE_LIMIT_RETRIES {
+                            let backoff = if let Some(retry_after_val) =
+                                resp.headers().get(reqwest::header::RETRY_AFTER)
+                            {
+                                if let Ok(retry_str) = retry_after_val.to_str() {
+                                    if let Ok(secs) = retry_str.trim().parse::<u64>() {
+                                        Duration::from_secs(secs.min(MAX_RETRY_AFTER_SECS))
+                                    } else {
+                                        Duration::from_millis(if attempt == 0 { 500 } else { 1000 })
+                                    }
+                                } else {
+                                    Duration::from_millis(if attempt == 0 { 500 } else { 1000 })
+                                }
+                            } else {
+                                Duration::from_millis(if attempt == 0 { 500 } else { 1000 })
+                            };
+
+                            tokio::time::sleep(backoff).await;
+                            continue;
+                        } else {
+                            return Err(HttpError::RateLimitExhausted(status_code));
+                        }
                     }
-                }
 
-                // Stream response body chunks while enforcing maximum payload size limit
-                let mut body_buf = BytesMut::new();
-                while let Some(chunk) = resp.chunk().await.map_err(|e| {
-                    HttpError::Network(format!("failed to read response chunk: {e}"))
-                })? {
-                    if body_buf.len() + chunk.len() > MAX_RESPONSE_BODY_BYTES {
-                        let audit_entry = AuditLogEntry {
-                            program_id: self.program_id.clone(),
-                            target_url: target.as_str().to_string(),
-                            http_method: "GET".to_string(),
-                            status_code: Some(status_code),
-                            duration_ms,
-                            rate_limited: was_rate_limited,
-                        };
-                        self.storage.record_audit_log(&audit_entry)?;
-                        return Err(HttpError::PayloadTooLarge(
-                            body_buf.len() + chunk.len(),
-                            MAX_RESPONSE_BODY_BYTES,
-                        ));
+                    // Capture redirect location header if present (301, 302, 307, 308)
+                    let redirect_location = resp
+                        .headers()
+                        .get(reqwest::header::LOCATION)
+                        .and_then(|val| val.to_str().ok().map(|s| s.to_string()));
+
+                    let mut resp_headers = Vec::new();
+                    for (name, val) in resp.headers() {
+                        if let Ok(v) = val.to_str() {
+                            resp_headers.push((name.as_str().to_string(), v.to_string()));
+                        }
                     }
-                    body_buf.extend_from_slice(&chunk);
+
+                    // Enforce maximum payload size limit on Content-Length header if available
+                    if let Some(content_length) = resp.content_length() {
+                        if content_length > MAX_RESPONSE_BODY_BYTES as u64 {
+                            let audit_entry = AuditLogEntry {
+                                program_id: self.program_id.clone(),
+                                target_url: target.as_str().to_string(),
+                                http_method: "GET".to_string(),
+                                status_code: Some(status_code),
+                                duration_ms,
+                                rate_limited: was_rate_limited,
+                            };
+                            self.storage.record_audit_log(&audit_entry)?;
+                            return Err(HttpError::PayloadTooLarge(
+                                content_length as usize,
+                                MAX_RESPONSE_BODY_BYTES,
+                            ));
+                        }
+                    }
+
+                    // Stream response body chunks while enforcing maximum payload size limit
+                    let mut body_buf = BytesMut::new();
+                    while let Some(chunk) = resp.chunk().await.map_err(|e| {
+                        HttpError::Network(format!("failed to read response chunk: {e}"))
+                    })? {
+                        if body_buf.len() + chunk.len() > MAX_RESPONSE_BODY_BYTES {
+                            let audit_entry = AuditLogEntry {
+                                program_id: self.program_id.clone(),
+                                target_url: target.as_str().to_string(),
+                                http_method: "GET".to_string(),
+                                status_code: Some(status_code),
+                                duration_ms,
+                                rate_limited: was_rate_limited,
+                            };
+                            self.storage.record_audit_log(&audit_entry)?;
+                            return Err(HttpError::PayloadTooLarge(
+                                body_buf.len() + chunk.len(),
+                                MAX_RESPONSE_BODY_BYTES,
+                            ));
+                        }
+                        body_buf.extend_from_slice(&chunk);
+                    }
+                    let body = body_buf.freeze();
+
+                    // Persist outbound request metadata in the audit log
+                    let audit_entry = AuditLogEntry {
+                        program_id: self.program_id.clone(),
+                        target_url: target.as_str().to_string(),
+                        http_method: "GET".to_string(),
+                        status_code: Some(status_code),
+                        duration_ms,
+                        rate_limited: was_rate_limited,
+                    };
+                    self.storage.record_audit_log(&audit_entry)?;
+
+                    return Ok(HttpProbeResponse {
+                        status_code,
+                        headers: resp_headers,
+                        body,
+                        redirect_location,
+                        duration_ms,
+                        rate_limited: was_rate_limited,
+                    });
                 }
-                let body = body_buf.freeze();
+                Err(err) => {
+                    // Record failed interaction in audit log for transparency
+                    let audit_entry = AuditLogEntry {
+                        program_id: self.program_id.clone(),
+                        target_url: target.as_str().to_string(),
+                        http_method: "GET".to_string(),
+                        status_code: None,
+                        duration_ms,
+                        rate_limited: was_rate_limited,
+                    };
+                    self.storage.record_audit_log(&audit_entry)?;
 
-                // Persist outbound request metadata in the audit log
-                let audit_entry = AuditLogEntry {
-                    program_id: self.program_id.clone(),
-                    target_url: target.as_str().to_string(),
-                    http_method: "GET".to_string(),
-                    status_code: Some(status_code),
-                    duration_ms,
-                    rate_limited: was_rate_limited,
-                };
-                self.storage.record_audit_log(&audit_entry)?;
-
-                Ok(HttpProbeResponse {
-                    status_code,
-                    headers,
-                    body,
-                    redirect_location,
-                    duration_ms,
-                    rate_limited: was_rate_limited,
-                })
-            }
-            Err(err) => {
-                // Record failed interaction in audit log for transparency
-                let audit_entry = AuditLogEntry {
-                    program_id: self.program_id.clone(),
-                    target_url: target.as_str().to_string(),
-                    http_method: "GET".to_string(),
-                    status_code: None,
-                    duration_ms,
-                    rate_limited: was_rate_limited,
-                };
-                self.storage.record_audit_log(&audit_entry)?;
-
-                Err(HttpError::Network(format!("HTTP request failed: {err}")))
+                    return Err(HttpError::Network(format!("HTTP request failed: {err}")));
+                }
             }
         }
+
+        Err(HttpError::Network(
+            "unexpected retry termination".to_string(),
+        ))
     }
 }
 
@@ -432,5 +480,112 @@ mod tests {
 
         let response = client.get(&verified).await.expect("request failed");
         assert_eq!(response.status_code, 200);
+    }
+
+    #[tokio::test]
+    async fn test_retry_after_backoff_and_rate_limited_audit_logging() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind failed");
+        let addr = listener.local_addr().expect("local_addr failed");
+        let port = addr.port();
+
+        // Spawn mock server returning HTTP 429 on first attempt, then HTTP 200 on retry
+        tokio::spawn(async move {
+            let mut attempt = 0;
+            while attempt < 2 {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buf = [0u8; 1024];
+                    let _ = socket.read(&mut buf).await;
+                    if attempt == 0 {
+                        let response = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+                        let _ = socket.write_all(response.as_bytes()).await;
+                    } else {
+                        let response =
+                            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nOK";
+                        let _ = socket.write_all(response.as_bytes()).await;
+                    }
+                    attempt += 1;
+                }
+            }
+        });
+
+        let storage = StorageEngine::open_in_memory().expect("storage open failed");
+        let mut config = test_scope_config(port);
+        config.rate_limit_rps = 100;
+        let program_id = storage
+            .upsert_program_scope(&config)
+            .expect("upsert failed");
+        let enforcer = ScopeEnforcer::new(config).expect("enforcer failed");
+
+        let client =
+            ScopedHttpClient::new(storage.clone(), program_id.clone(), 100).expect("client failed");
+        let target_url = format!("http://127.0.0.1:{}/rate-limit-test", port);
+        let verified = enforcer
+            .validate_url(&target_url)
+            .expect("validation failed");
+
+        let response = client
+            .get(&verified)
+            .await
+            .expect("request should succeed after retry");
+        assert_eq!(response.status_code, 200);
+        assert!(response.rate_limited);
+
+        let logs = storage.get_audit_logs(&program_id).expect("logs failed");
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].status_code, Some(429));
+        assert!(logs[0].rate_limited);
+        assert_eq!(logs[1].status_code, Some(200));
+        assert!(logs[1].rate_limited);
+    }
+
+    #[tokio::test]
+    async fn test_retry_exhausted_on_consecutive_429() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind failed");
+        let addr = listener.local_addr().expect("local_addr failed");
+        let port = addr.port();
+
+        // Spawn mock server returning HTTP 429 on all attempts
+        tokio::spawn(async move {
+            let mut attempt = 0;
+            while attempt < 3 {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buf = [0u8; 1024];
+                    let _ = socket.read(&mut buf).await;
+                    let response = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    attempt += 1;
+                }
+            }
+        });
+
+        let storage = StorageEngine::open_in_memory().expect("storage open failed");
+        let mut config = test_scope_config(port);
+        config.rate_limit_rps = 100;
+        let program_id = storage
+            .upsert_program_scope(&config)
+            .expect("upsert failed");
+        let enforcer = ScopeEnforcer::new(config).expect("enforcer failed");
+
+        let client =
+            ScopedHttpClient::new(storage.clone(), program_id.clone(), 100).expect("client failed");
+        let target_url = format!("http://127.0.0.1:{}/exhaust-test", port);
+        let verified = enforcer
+            .validate_url(&target_url)
+            .expect("validation failed");
+
+        let result = client.get(&verified).await;
+        match result {
+            Err(HttpError::RateLimitExhausted(status)) => {
+                assert_eq!(status, 429);
+            }
+            other => panic!("expected RateLimitExhausted(429), got {:?}", other),
+        }
+
+        let logs = storage.get_audit_logs(&program_id).expect("logs failed");
+        assert_eq!(logs.len(), 3);
+        for entry in &logs {
+            assert_eq!(entry.status_code, Some(429));
+            assert!(entry.rate_limited);
+        }
     }
 }

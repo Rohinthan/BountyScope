@@ -307,13 +307,22 @@ fn matches_path_pattern(pattern: &str, path: &str) -> bool {
     path.starts_with(&prefix_with_slash)
 }
 
-/// Lexically normalizes a URL path by decoding percent-encoded characters,
-/// collapsing multiple slashes, and resolving `.` and `..` traversal segments.
+/// Lexically normalizes a URL path by decoding percent-encoded characters (up to 3 passes
+/// to prevent double-encoding bypasses), collapsing multiple slashes, and resolving `.` and `..` traversal segments.
 pub fn normalize_path(raw_path: &str) -> String {
-    let decoded = percent_encoding::percent_decode_str(raw_path).decode_utf8_lossy();
+    let mut current = raw_path.to_string();
+    for _ in 0..3 {
+        let decoded = percent_encoding::percent_decode_str(&current)
+            .decode_utf8_lossy()
+            .to_string();
+        if decoded == current {
+            break;
+        }
+        current = decoded;
+    }
 
     let mut segments: Vec<&str> = Vec::new();
-    for seg in decoded.split('/') {
+    for seg in current.split('/') {
         match seg {
             "" | "." => {}
             ".." => {
@@ -497,6 +506,8 @@ mod tests {
         assert_eq!(normalize_path("//logout"), "/logout");
         assert_eq!(normalize_path("/public/../logout"), "/logout");
         assert_eq!(normalize_path("/%2e%2e/logout"), "/logout");
+        assert_eq!(normalize_path("/%252e%252e/logout"), "/logout");
+        assert_eq!(normalize_path("/a/b/../../logout"), "/logout");
         assert_eq!(normalize_path("/a/b/../../c"), "/c");
         assert_eq!(normalize_path("/"), "/");
     }

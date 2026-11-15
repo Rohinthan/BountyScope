@@ -59,6 +59,9 @@ pub enum HttpError {
     #[error("Response body exceeded maximum allowed size of {0} bytes (limit: {1} bytes)")]
     PayloadTooLarge(usize, usize),
 
+    #[error("Rate limit or service unavailable (HTTP {0}): retries exhausted")]
+    RateLimitExhausted(u16),
+
     #[error("Storage error during HTTP operation: {0}")]
     Storage(#[from] StorageError),
 

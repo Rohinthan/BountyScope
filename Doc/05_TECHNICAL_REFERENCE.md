@@ -1,6 +1,6 @@
 # BountyScope Consolidated Technical Reference
 
-**Document Version:** 0.14.0  
+**Document Version:** 0.14.1  
 **Specification Level:** Final Technical Reference  
 **Applicability:** `bountyscope` CLI and Core Subsystems  
 
@@ -159,9 +159,11 @@ Upon establishing every SQLite connection, the engine executes:
 ```sql
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
+PRAGMA user_version;
 ```
 - **Write-Ahead Logging (WAL):** Allows simultaneous concurrent readers without blocking active single-writer transactions.
 - **Foreign Key Constraints (`ON`):** Enforces relational integrity across all tables. Child records referencing deleted programs or endpoints are automatically cascaded or set to null.
+- **Deterministic Schema Versioning (`user_version = 1`):** Tracks database migrations cleanly. Fresh databases initialize directly at version 1. Legacy databases lacking recent columns (e.g., `policy_url` on `programs`) are upgraded via verified `ALTER TABLE` statements before advancing `user_version` to 1.
 
 ### Table Definitions & Indexes
 
@@ -363,3 +365,36 @@ bountyscope report --config configs/scope.local.yaml --stdout
 cd lab
 docker compose down
 ```
+
+---
+
+## 9. Threat Model & Operational Boundaries
+
+BountyScope is designed under a defense-in-depth safety paradigm that enforces strict operational boundaries directly in software architecture.
+
+### Built-in System Guarantees
+
+1. **Compile-Time Scope Enforcement (`VerifiedScopeUrl`):**  
+   All HTTP network operations strictly consume `VerifiedScopeUrl`. Because the type's constructor is private and can only be obtained through `ScopeEnforcer::validate_url()`, it is architecturally impossible for internal code or external callers to dispatch network requests to arbitrary unverified URLs.
+
+2. **Non-Redirecting Transport (`Policy::none()`):**  
+   The HTTP transport engine enforces `reqwest::redirect::Policy::none()`. Standard HTTP redirect responses (`301 Moved Permanently`, `302 Found`, `307 Temporary Redirect`, `308 Permanent Redirect`) are captured passively as surface discovery telemetry rather than automatically followed. This prevents hostile redirect chains from leading the scanner outside configured scope boundaries or into private intranet infrastructure.
+
+3. **Rate-Limited, Non-Destructive `GET`-Only Requests:**  
+   Outbound requests are strictly limited to HTTP `GET` operations. All request dispatching is throttled through an asynchronous rate limiter governed by `rate_limit_rps` (defaulting to 2 requests per second). On receiving HTTP `429 Too Many Requests` or `503 Service Unavailable`, the engine applies bounded exponential backoff or honors numeric `Retry-After` headers (capped at 5 seconds) for up to 2 retries, logging `rate_limited = true` in the SQLite audit log.
+
+4. **Streamed Payload Ceiling (`5 MiB`):**  
+   Responses are streamed and chunked up to a maximum ceiling of 5 MiB (`MAX_RESPONSE_BODY_BYTES`). Payloads exceeding this limit immediately abort streaming and raise `HttpError::PayloadTooLarge`, preventing memory exhaustion or denial of service against the scanning host.
+
+### Operator Responsibilities & Operational Limitations
+
+While BountyScope provides robust automated boundaries, operators must remain aware of several operational limitations:
+
+1. **Non-RESTful State Changes on HTTP `GET`:**  
+   While BountyScope exclusively issues HTTP `GET` requests, poorly architected target applications may occasionally execute state-changing actions (such as session termination, account state modifications, or administrative triggers) via `GET` parameters. Operators are responsible for identifying sensitive administrative or mutating URL patterns and adding them to `excluded_paths` (e.g., `/logout`, `/admin/delete`, `/reset`).
+
+2. **Hostname Validation Prior to DNS Resolution (DNS Rebinding / TOCTOU):**  
+   Scope boundary verification evaluates URL hostnames and lexical IP strings prior to network socket resolution. If an in-scope domain resolves to a dynamic or manipulated IP address (e.g., via DNS rebinding or Time-of-Check to Time-of-Use DNS record switching during multi-stage queries), socket connections could potentially reach unintended hosts unless the host resolver or network proxy pins DNS responses. Operators assessing multi-tenant or user-controlled DNS environments should ensure upstream DNS resolution is trustworthy.
+
+3. **Passive Inspection vs. Active Exploitation:**  
+   BountyScope performs passive reconnaissance, metadata extraction, header auditing, and specification discovery. It intentionally does not conduct active vulnerability exploitation, state-changing mutation, SQL injection exploitation, remote code execution fuzzing, or credential brute-forcing. Findings indicate policy non-compliance, missing defenses, or specification exposures rather than confirmed exploitable compromise.

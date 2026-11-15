@@ -197,12 +197,49 @@ impl StorageEngine {
         "#;
 
         conn.execute_batch(schema)?;
-        // Ensure policy_url column exists in programs table if created in earlier schema
-        let _ = conn.execute("ALTER TABLE programs ADD COLUMN policy_url TEXT;", []);
+
+        // Deterministic schema versioning and migration via PRAGMA user_version
+        Self::apply_migrations(&conn)?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
+    }
+
+    /// Evaluates schema version via `PRAGMA user_version` and applies pending migrations deterministically.
+    fn apply_migrations(conn: &Connection) -> Result<(), StorageError> {
+        let user_version: i32 = conn.query_row("PRAGMA user_version;", [], |row| row.get(0))?;
+
+        if user_version < 1 {
+            // Inspect existing columns in programs table
+            let mut stmt = conn.prepare("PRAGMA table_info(programs);")?;
+            let mut rows = stmt.query([])?;
+            let mut has_programs_table = false;
+            let mut has_policy_url = false;
+
+            while let Some(row) = rows.next()? {
+                has_programs_table = true;
+                let col_name: String = row.get(1)?;
+                if col_name.eq_ignore_ascii_case("policy_url") {
+                    has_policy_url = true;
+                }
+            }
+
+            if has_programs_table && !has_policy_url {
+                conn.execute("ALTER TABLE programs ADD COLUMN policy_url TEXT;", [])?;
+            }
+
+            conn.pragma_update(None, "user_version", 1)?;
+        }
+
+        Ok(())
+    }
+
+    /// Returns the current schema version from `PRAGMA user_version`.
+    pub fn schema_version(&self) -> Result<i32, StorageError> {
+        let conn = self.conn.lock().map_err(|_| StorageError::LockFailure)?;
+        let version: i32 = conn.query_row("PRAGMA user_version;", [], |row| row.get(0))?;
+        Ok(version)
     }
 
     /// Upserts a target program definition and updates its associated scope boundary rules.
@@ -838,5 +875,94 @@ mod tests {
         assert_eq!(findings[0].finding_type, "cors_misconfiguration");
         assert_eq!(findings[1].severity, "LOW");
         assert_eq!(findings[1].description, "Updated CSP description");
+    }
+
+    #[test]
+    fn test_fresh_db_initializes_schema_version_1() {
+        let storage = StorageEngine::open_in_memory().expect("open_in_memory failed");
+        assert_eq!(storage.schema_version().expect("schema_version failed"), 1);
+    }
+
+    #[test]
+    fn test_legacy_db_without_policy_url_migrates_cleanly() {
+        let dir = tempfile::tempdir().expect("tempdir failed");
+        let db_path = dir.path().join("legacy.db");
+
+        // Create legacy schema without policy_url and insert existing row
+        {
+            let conn = Connection::open(&db_path).expect("open legacy conn failed");
+            conn.execute(
+                "CREATE TABLE programs (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    platform TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );",
+                [],
+            )
+            .expect("create legacy table failed");
+
+            conn.execute(
+                "INSERT INTO programs (id, name, platform) VALUES ('p1', 'legacy-app', 'hackerone');",
+                [],
+            )
+            .expect("insert legacy row failed");
+        }
+
+        // Open with StorageEngine and verify automatic migration
+        let storage = StorageEngine::open(&db_path).expect("open StorageEngine failed");
+        assert_eq!(storage.schema_version().expect("schema_version failed"), 1);
+
+        let prog = storage
+            .get_program_by_id("p1")
+            .expect("get_program_by_id failed");
+        assert_eq!(prog.name, "legacy-app");
+        assert_eq!(prog.platform, "hackerone");
+        assert_eq!(prog.policy_url, None);
+
+        // Verify policy_url can be updated
+        let mut config = sample_config();
+        config.program_name = "legacy-app".to_string();
+        config.policy_url = Some("https://example.com/policy".to_string());
+        storage
+            .upsert_program_scope(&config)
+            .expect("upsert_program_scope failed");
+
+        let updated_prog = storage
+            .get_program_by_id("p1")
+            .expect("get updated program failed");
+        assert_eq!(
+            updated_prog.policy_url,
+            Some("https://example.com/policy".to_string())
+        );
+    }
+
+    #[test]
+    fn test_reopening_migrated_db_is_idempotent() {
+        let dir = tempfile::tempdir().expect("tempdir failed");
+        let db_path = dir.path().join("reopen.db");
+
+        {
+            let storage = StorageEngine::open(&db_path).expect("first open failed");
+            assert_eq!(storage.schema_version().expect("schema_version failed"), 1);
+            let config = sample_config();
+            storage
+                .upsert_program_scope(&config)
+                .expect("upsert failed");
+        }
+
+        {
+            let storage = StorageEngine::open(&db_path).expect("second open failed");
+            assert_eq!(storage.schema_version().expect("schema_version failed"), 1);
+            let config = sample_config();
+            let prog_id = storage
+                .upsert_program_scope(&config)
+                .expect("second upsert failed");
+            let prog = storage
+                .get_program_by_id(&prog_id)
+                .expect("get program failed");
+            assert_eq!(prog.name, config.program_name);
+        }
     }
 }

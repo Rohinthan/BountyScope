@@ -93,7 +93,7 @@ pub struct BountyScopeMcpServer {
 impl ServerHandler for BountyScopeMcpServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("bountyscope", "0.14.0"))
+            .with_server_info(Implementation::new("bountyscope", "0.14.1"))
             .with_instructions(
                 "BountyScope Model Context Protocol server exposing scope validation, mapped endpoints, security findings, and assessment reports.",
             )

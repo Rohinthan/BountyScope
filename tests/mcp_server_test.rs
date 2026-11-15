@@ -101,7 +101,10 @@ async fn test_end_to_end_mcp_session_over_duplex_stream() {
     assert_eq!(init_resp["id"], 1);
     assert!(init_resp["result"]["capabilities"]["tools"].is_object());
     assert_eq!(init_resp["result"]["serverInfo"]["name"], "bountyscope");
-    assert_eq!(init_resp["result"]["serverInfo"]["version"], "0.14.0");
+    assert_eq!(
+        init_resp["result"]["serverInfo"]["version"],
+        env!("CARGO_PKG_VERSION")
+    );
 
     // 4. Send notifications/initialized
     let initialized_notif = json!({
