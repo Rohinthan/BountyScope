@@ -1,6 +1,6 @@
 # BountyScope Consolidated Technical Reference
 
-**Document Version:** 0.14.1  
+**Document Version:** 0.15.0  
 **Specification Level:** Final Technical Reference  
 **Applicability:** `bountyscope` CLI and Core Subsystems  
 
@@ -12,17 +12,19 @@ BountyScope is a scope-locked reconnaissance, passive policy verification, and M
 
 ### Foundational Invariants
 
-All operations throughout BountyScope are governed by five inviolable architectural invariants:
+All operations throughout BountyScope are governed by six inviolable architectural invariants:
 
 1. **Fail-Closed Authorization:**  
    Every target domain, IP address, and URI path is treated as unauthorized until explicitly validated against the target scope specification. Any unparseable, ambiguous, or malformed URL immediately aborts execution.
 2. **Compile-Time Scope Enforcement (`VerifiedScopeUrl`):**  
    The HTTP networking layer cannot accept raw string representations or unvalidated URL types. Outbound requests strictly require an unforgeable token (`VerifiedScopeUrl`) whose private constructor can only be invoked through `ScopeEnforcer::validate_url()`.
-3. **Deterministic Rate and Concurrency Controls:**  
+3. **Socket-Level DNS IP Guard (`ScopeAwareDnsResolver`):**  
+   Before TCP socket connection, every resolved `SocketAddr` is inspected. Resolutions to loopback (`127.0.0.0/8`, `::1`), RFC 1918 private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local (`169.254.0.0/16`, `fe80::/10`), CGNAT (`100.64.0.0/10`), or IPv4-mapped IPv6 addresses are blocked unless explicitly permitted in `scope.yaml`.
+4. **Deterministic Rate and Concurrency Controls:**  
    Outbound requests are metered by an internal mutex-scheduled token bucket derived from `rate_limit_rps` (defaulting to 2 requests per second in safe mode). Concurrency is deterministic to prevent service degradation.
-4. **Streamed Response Payload Ceiling (`5 MiB`):**  
+5. **Streamed Response Payload Ceiling (`5 MiB`):**  
    The HTTP client enforces a strict response body limit of 5 MiB (`5 * 1024 * 1024` bytes) using chunked stream consumption. Responses exceeding this threshold return `HttpError::PayloadTooLarge` while recording an audit log entry, preventing unbounded memory allocation or denial-of-service against the scanner.
-5. **Non-Destructive Inspection Guarantee:**  
+6. **Non-Destructive Inspection Guarantee:**  
    The engine performs passive analysis, metadata extraction, configuration inspection, and read-only schema discovery. No mutating requests (such as state-changing POST/PUT/DELETE, credential testing, or automated fuzzing) are performed.
 
 ---
@@ -377,13 +379,16 @@ BountyScope is designed under a defense-in-depth safety paradigm that enforces s
 1. **Compile-Time Scope Enforcement (`VerifiedScopeUrl`):**  
    All HTTP network operations strictly consume `VerifiedScopeUrl`. Because the type's constructor is private and can only be obtained through `ScopeEnforcer::validate_url()`, it is architecturally impossible for internal code or external callers to dispatch network requests to arbitrary unverified URLs.
 
-2. **Non-Redirecting Transport (`Policy::none()`):**  
+2. **Socket-Level DNS IP Guard (`ScopeAwareDnsResolver`):**  
+   Outbound network connections install a custom resolver implementing `reqwest::dns::Resolve` that intercepts resolution immediately before TCP socket creation. The resolver inspects every resolved `SocketAddr` (including IPv4-mapped IPv6) and rejects loopback (`127.0.0.0/8`, `::1`), RFC 1918 private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local (`169.254.0.0/16`, `fe80::/10`), CGNAT (`100.64.0.0/10`), and unspecified IPs unless that exact IP or loopback host was explicitly allowlisted in `scope.yaml`. This eliminates DNS rebinding and internal SSRF risks.
+
+3. **Non-Redirecting Transport (`Policy::none()`):**  
    The HTTP transport engine enforces `reqwest::redirect::Policy::none()`. Standard HTTP redirect responses (`301 Moved Permanently`, `302 Found`, `307 Temporary Redirect`, `308 Permanent Redirect`) are captured passively as surface discovery telemetry rather than automatically followed. This prevents hostile redirect chains from leading the scanner outside configured scope boundaries or into private intranet infrastructure.
 
-3. **Rate-Limited, Non-Destructive `GET`-Only Requests:**  
+4. **Rate-Limited, Non-Destructive `GET`-Only Requests:**  
    Outbound requests are strictly limited to HTTP `GET` operations. All request dispatching is throttled through an asynchronous rate limiter governed by `rate_limit_rps` (defaulting to 2 requests per second). On receiving HTTP `429 Too Many Requests` or `503 Service Unavailable`, the engine applies bounded exponential backoff or honors numeric `Retry-After` headers (capped at 5 seconds) for up to 2 retries, logging `rate_limited = true` in the SQLite audit log.
 
-4. **Streamed Payload Ceiling (`5 MiB`):**  
+5. **Streamed Payload Ceiling (`5 MiB`):**  
    Responses are streamed and chunked up to a maximum ceiling of 5 MiB (`MAX_RESPONSE_BODY_BYTES`). Payloads exceeding this limit immediately abort streaming and raise `HttpError::PayloadTooLarge`, preventing memory exhaustion or denial of service against the scanning host.
 
 ### Operator Responsibilities & Operational Limitations
@@ -393,8 +398,8 @@ While BountyScope provides robust automated boundaries, operators must remain aw
 1. **Non-RESTful State Changes on HTTP `GET`:**  
    While BountyScope exclusively issues HTTP `GET` requests, poorly architected target applications may occasionally execute state-changing actions (such as session termination, account state modifications, or administrative triggers) via `GET` parameters. Operators are responsible for identifying sensitive administrative or mutating URL patterns and adding them to `excluded_paths` (e.g., `/logout`, `/admin/delete`, `/reset`).
 
-2. **Hostname Validation Prior to DNS Resolution (DNS Rebinding / TOCTOU):**  
-   Scope boundary verification evaluates URL hostnames and lexical IP strings prior to network socket resolution. If an in-scope domain resolves to a dynamic or manipulated IP address (e.g., via DNS rebinding or Time-of-Check to Time-of-Use DNS record switching during multi-stage queries), socket connections could potentially reach unintended hosts unless the host resolver or network proxy pins DNS responses. Operators assessing multi-tenant or user-controlled DNS environments should ensure upstream DNS resolution is trustworthy.
+2. **Socket-Level DNS Mitigation vs. Public DNS Flapping:**  
+   While BountyScope actively eliminates DNS rebinding to internal, loopback, and cloud metadata infrastructure at the socket resolver layer, public-to-public DNS flapping or multi-tenant IP shifts remain governed by upstream authoritative DNS resolvers. Operators assessing multi-tenant public cloud environments should maintain current scope boundaries.
 
 3. **Passive Inspection vs. Active Exploitation:**  
    BountyScope performs passive reconnaissance, metadata extraction, header auditing, and specification discovery. It intentionally does not conduct active vulnerability exploitation, state-changing mutation, SQL injection exploitation, remote code execution fuzzing, or credential brute-forcing. Findings indicate policy non-compliance, missing defenses, or specification exposures rather than confirmed exploitable compromise.

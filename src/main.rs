@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "bountyscope")]
-#[command(version = "0.14.1")]
+#[command(version = "0.15.0")]
 #[command(
     about = "Automated vulnerability surface mapping and passive policy verification engine",
     long_about = "BountyScope is an automated vulnerability surface mapping and passive policy verification engine designed for authorized security assessments and bug bounty programs."
@@ -188,7 +188,7 @@ async fn main() -> Result<()> {
         }) => execute_report(&config, &db, &output, stdout),
         Some(Commands::Mcp { config, db }) => execute_mcp(&config, &db).await,
         None => {
-            println!("BountyScope v0.14.1 - Vulnerability Surface Mapping Engine");
+            println!("BountyScope v0.15.0 - Vulnerability Surface Mapping Engine");
             println!("Run 'bountyscope --help' for available commands.");
             Ok(())
         }

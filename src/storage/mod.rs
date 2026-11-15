@@ -316,6 +316,20 @@ impl StorageEngine {
         Ok(program_id)
     }
 
+    /// Retrieves all allowed domain patterns associated with a program.
+    pub fn get_allowed_domains(&self, program_id: &str) -> Result<Vec<String>, StorageError> {
+        let conn = self.conn.lock().map_err(|_| StorageError::LockFailure)?;
+        let mut stmt = conn.prepare(
+            "SELECT pattern FROM scope_rules WHERE program_id = ?1 AND rule_type = 'allow_domain';",
+        )?;
+        let rows = stmt.query_map(params![program_id], |row| row.get(0))?;
+        let mut domains = Vec::new();
+        for r in rows {
+            domains.push(r?);
+        }
+        Ok(domains)
+    }
+
     /// Records an outbound HTTP interaction into the audit log.
     pub fn record_audit_log(&self, entry: &AuditLogEntry) -> Result<i64, StorageError> {
         let conn = self.conn.lock().map_err(|_| StorageError::LockFailure)?;
