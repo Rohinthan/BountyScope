@@ -376,9 +376,9 @@ researcher_handle: "format-tester"
     let json_val: serde_json::Value =
         serde_json::from_str(&json_stdout).expect("valid JSON stdout expected");
 
-    assert_eq!(json_val["schema_version"], "0.15.3");
+    assert_eq!(json_val["schema_version"], "0.16.0");
     assert_eq!(json_val["tool"]["name"], "BountyScope");
-    assert_eq!(json_val["tool"]["version"], "0.15.3");
+    assert_eq!(json_val["tool"]["version"], "0.16.0");
     assert_eq!(json_val["program"]["name"], "cli-multiformat-test");
     assert_eq!(json_val["program"]["researcher_handle"], "format-tester");
     assert!(!json_val["endpoints"]
@@ -413,7 +413,7 @@ researcher_handle: "format-tester"
         sarif_val["runs"][0]["tool"]["driver"]["name"],
         "BountyScope"
     );
-    assert_eq!(sarif_val["runs"][0]["tool"]["driver"]["version"], "0.15.3");
+    assert_eq!(sarif_val["runs"][0]["tool"]["driver"]["version"], "0.16.0");
     assert!(sarif_val["runs"][0]["tool"]["driver"]["rules"].is_array());
     assert!(sarif_val["runs"][0]["results"].is_array());
 
@@ -448,9 +448,9 @@ researcher_handle: "format-tester"
     let diff_val: serde_json::Value =
         serde_json::from_str(&diff_stdout).expect("valid JSON diff expected");
 
-    assert_eq!(diff_val["schema_version"], "0.15.3");
+    assert_eq!(diff_val["schema_version"], "0.16.0");
     assert_eq!(diff_val["tool"]["name"], "BountyScope");
-    assert_eq!(diff_val["tool"]["version"], "0.15.3");
+    assert_eq!(diff_val["tool"]["version"], "0.16.0");
     assert_eq!(diff_val["program_name"], "cli-multiformat-test");
     assert!(diff_val["metrics"].is_object());
 

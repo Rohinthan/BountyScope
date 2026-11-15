@@ -1,6 +1,6 @@
 # BountyScope Consolidated Technical Reference
 
-**Document Version:** 0.15.3  
+**Document Version:** 0.16.0  
 **Specification Level:** Final Technical Reference  
 **Applicability:** `bountyscope` CLI and Core Subsystems  
 
@@ -376,7 +376,7 @@ BountyScope features two standardized machine-readable exporters:
    - Also implemented for `bountyscope diff --format json`, rendering structured regression metrics, endpoint additions/removals, status transitions, and newly identified security issues.
 2. **OASIS SARIF v2.1.0 (`--format sarif`):**
    - Implements OASIS Static Analysis Results Interchange Format (version 2.1.0) conforming to `https://json.schemastore.org/sarif-2.1.0.json`.
-   - Driver Component: `runs[0].tool.driver` contains name `"BountyScope"`, version `"0.15.3"`, information URI, and deduplicated `rules[]` entries with title descriptions, full descriptions, and remediation guidance.
+   - Driver Component: `runs[0].tool.driver` contains name `"BountyScope"`, version `"0.16.0"`, information URI, and deduplicated `rules[]` entries with title descriptions, full descriptions, and remediation guidance.
    - Severity-to-Level Mapping:
      - `CRITICAL` / `HIGH` -> `"error"` (`security-severity: "9.0"` / `"7.0"`)
      - `MEDIUM` -> `"warning"` (`security-severity: "5.0"`)
@@ -471,3 +471,40 @@ While BountyScope provides robust automated boundaries, operators must remain aw
 
 3. **Passive Inspection vs. Active Exploitation:**  
    BountyScope performs passive reconnaissance, metadata extraction, header auditing, and specification discovery. It intentionally does not conduct active vulnerability exploitation, state-changing mutation, SQL injection exploitation, remote code execution fuzzing, or credential brute-forcing. Findings indicate policy non-compliance, missing defenses, or specification exposures rather than confirmed exploitable compromise.
+
+---
+
+## 10. Continuous Integration & Cross-Platform Release Pipeline (v0.16.0)
+
+BountyScope enforces full automated quality assurance and deterministic multi-architecture distribution via GitHub Actions.
+
+### Continuous Integration (`.github/workflows/ci.yml`)
+
+The CI workflow triggers automatically on every `push` to `main` and on all pull requests, executing a multi-platform matrix test suite across Linux, macOS, and Windows:
+
+- **Target Matrix:** `ubuntu-latest`, `macos-latest`, `windows-latest`
+- **Toolchain Management:** `dtolnay/rust-toolchain@stable` with `rustfmt` and `clippy` components.
+- **Dependency Caching:** `Swatinem/rust-cache@v2` across matrix runners to ensure fast, deterministic feedback cycles.
+- **Enforcement Pipeline:**
+  - Code formatting: `cargo fmt --check` (enforced on Linux).
+  - Static analysis: `cargo clippy --all-targets --all-features -- -D warnings` (zero warnings tolerance).
+  - Unit and integration tests: `cargo test` across all platforms.
+
+### Automated Cross-Platform Release Pipeline (`.github/workflows/release.yml`)
+
+Triggered on any tag matching `v*` (such as `v0.16.0`), the release pipeline compiles standalone binaries across 4 distinct target triples:
+
+| Target Platform | Target Triple | Distribution Archive | Checksum |
+| :--- | :--- | :--- | :--- |
+| **Linux (x86_64)** | `x86_64-unknown-linux-gnu` | `bountyscope-v<version>-linux-x86_64.tar.gz` | `.tar.gz.sha256` |
+| **macOS (Apple Silicon)** | `aarch64-apple-darwin` | `bountyscope-v<version>-macos-aarch64.tar.gz` | `.tar.gz.sha256` |
+| **macOS (Intel)** | `x86_64-apple-darwin` | `bountyscope-v<version>-macos-x86_64.tar.gz` | `.tar.gz.sha256` |
+| **Windows (x86_64)** | `x86_64-pc-windows-msvc` | `bountyscope-v<version>-windows-x86_64.zip` | `.zip.sha256` |
+
+Each distribution archive bundles:
+1. The optimized release binary (`bountyscope` or `bountyscope.exe`).
+2. Legal notice: `LICENSE`.
+3. Quick start guide: `README.md`.
+4. Template scope configuration: `configs/scope.example.yaml`.
+
+Every packaged archive is cryptographically hashed using SHA-256 (`.sha256`), and all assets are attached directly to the GitHub Release via `softprops/action-gh-release@v2` with automated release notes.

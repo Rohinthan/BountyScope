@@ -684,10 +684,10 @@ impl ReportGenerator {
             .collect();
 
         let report = JsonReport {
-            schema_version: "0.15.3".to_string(),
+            schema_version: "0.16.0".to_string(),
             tool: JsonToolMetadata {
                 name: "BountyScope".to_string(),
-                version: "0.15.3".to_string(),
+                version: "0.16.0".to_string(),
             },
             program: JsonProgramMetadata {
                 name: program.name.clone(),
@@ -790,7 +790,7 @@ impl ReportGenerator {
                 tool: SarifTool {
                     driver: SarifDriver {
                         name: "BountyScope".to_string(),
-                        version: "0.15.3".to_string(),
+                        version: "0.16.0".to_string(),
                         information_uri: "https://github.com/Rohinthan/BountyScope".to_string(),
                         rules: rules_map.into_values().collect(),
                     },
@@ -810,10 +810,10 @@ impl ReportGenerator {
             diff.current_run.findings_count as i64 - diff.baseline_run.findings_count as i64;
 
         let diff_report = JsonDiffReport {
-            schema_version: "0.15.3".to_string(),
+            schema_version: "0.16.0".to_string(),
             tool: JsonToolMetadata {
                 name: "BountyScope".to_string(),
-                version: "0.15.3".to_string(),
+                version: "0.16.0".to_string(),
             },
             program_name: diff.program_name.clone(),
             baseline_run: diff.baseline_run.clone(),
@@ -1051,9 +1051,9 @@ mod tests {
 
         let val: serde_json::Value = serde_json::from_str(&json_str).expect("valid JSON expected");
 
-        assert_eq!(val["schema_version"], "0.15.3");
+        assert_eq!(val["schema_version"], "0.16.0");
         assert_eq!(val["tool"]["name"], "BountyScope");
-        assert_eq!(val["tool"]["version"], "0.15.3");
+        assert_eq!(val["tool"]["version"], "0.16.0");
         assert_eq!(val["program"]["name"], "json-test-app");
         assert_eq!(val["program"]["researcher_handle"], "bug-hunter");
         assert_eq!(val["summary"]["endpoints_count"], 1);
@@ -1123,7 +1123,7 @@ mod tests {
         let diff_val: serde_json::Value =
             serde_json::from_str(&diff_json_str).expect("valid JSON diff expected");
 
-        assert_eq!(diff_val["schema_version"], "0.15.3");
+        assert_eq!(diff_val["schema_version"], "0.16.0");
         assert_eq!(diff_val["program_name"], "json-test-app");
         assert_eq!(diff_val["metrics"]["total_endpoints_delta"], 1);
         assert_eq!(diff_val["metrics"]["new_findings_count"], 1);
@@ -1271,7 +1271,7 @@ mod tests {
 
         let driver = &val["runs"][0]["tool"]["driver"];
         assert_eq!(driver["name"], "BountyScope");
-        assert_eq!(driver["version"], "0.15.3");
+        assert_eq!(driver["version"], "0.16.0");
         assert_eq!(
             driver["informationUri"],
             "https://github.com/Rohinthan/BountyScope"

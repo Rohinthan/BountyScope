@@ -130,7 +130,7 @@ dependencies = [
 
 [[package]]
 name = "bountyscope"
-version = "0.15.3"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "bytes",

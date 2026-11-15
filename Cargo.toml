@@ -1,6 +1,6 @@
 [package]
 name = "bountyscope"
-version = "0.15.3"
+version = "0.16.0"
 edition = "2021"
 authors = ["BountyScope Contributors"]
 description = "Scope-locked vulnerability surface mapping, passive policy auditing, and MCP triage CLI"

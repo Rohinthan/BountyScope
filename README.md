@@ -1,6 +1,7 @@
 # BountyScope
 
-[![Version](https://img.shields.io/badge/version-0.15.3-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.16.0-blue.svg)](Cargo.toml)
+[![CI](https://github.com/Rohinthan/BountyScope/actions/workflows/ci.yml/badge.svg)](https://github.com/Rohinthan/BountyScope/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
 BountyScope is a scope-locked reconnaissance, passive policy auditing, and Model Context Protocol (MCP) triage command-line interface written in Rust. It is engineered for authorized bug bounty programs, defensive security reviews, and vulnerability disclosure assessments. The system guarantees strict scope boundaries, non-destructive policy evaluation, deterministic rate limiting, and compile-time target verification before executing any network interactions.
@@ -66,7 +67,55 @@ flowchart TD
 
 ### Installation & Verification
 
-#### Linux & macOS (bash / zsh)
+#### Option 1: Download Pre-Built Binaries (GitHub Releases)
+
+Pre-compiled, statically linked release archives and SHA-256 checksums are published for Linux, macOS, and Windows on every release at [GitHub Releases](https://github.com/Rohinthan/BountyScope/releases):
+
+| Operating System | Target Triple | Archive File | Verification Command |
+| :--- | :--- | :--- | :--- |
+| **Linux (x86_64)** | `x86_64-unknown-linux-gnu` | `bountyscope-v0.16.0-linux-x86_64.tar.gz` | `sha256sum -c bountyscope-v0.16.0-linux-x86_64.tar.gz.sha256` |
+| **macOS (Apple Silicon)** | `aarch64-apple-darwin` | `bountyscope-v0.16.0-macos-aarch64.tar.gz` | `shasum -a 256 -c bountyscope-v0.16.0-macos-aarch64.tar.gz.sha256` |
+| **macOS (Intel)** | `x86_64-apple-darwin` | `bountyscope-v0.16.0-macos-x86_64.tar.gz` | `shasum -a 256 -c bountyscope-v0.16.0-macos-x86_64.tar.gz.sha256` |
+| **Windows (x86_64)** | `x86_64-pc-windows-msvc` | `bountyscope-v0.16.0-windows-x86_64.zip` | `Get-FileHash -Algorithm SHA256 bountyscope-v0.16.0-windows-x86_64.zip` |
+
+##### Linux / macOS Quick Download & Verification
+
+```bash
+VERSION="0.16.0"
+PLATFORM="linux-x86_64" # or "macos-aarch64" / "macos-x86_64"
+
+# Download distribution archive and checksum
+curl -LO "https://github.com/Rohinthan/BountyScope/releases/download/v${VERSION}/bountyscope-v${VERSION}-${PLATFORM}.tar.gz"
+curl -LO "https://github.com/Rohinthan/BountyScope/releases/download/v${VERSION}/bountyscope-v${VERSION}-${PLATFORM}.tar.gz.sha256"
+
+# Verify SHA-256 checksum
+sha256sum -c "bountyscope-v${VERSION}-${PLATFORM}.tar.gz.sha256" || shasum -a 256 -c "bountyscope-v${VERSION}-${PLATFORM}.tar.gz.sha256"
+
+# Extract and install binary to ~/.cargo/bin or /usr/local/bin
+tar -xzf "bountyscope-v${VERSION}-${PLATFORM}.tar.gz"
+mkdir -p ~/.cargo/bin
+mv bountyscope ~/.cargo/bin/
+```
+
+##### Windows (PowerShell) Quick Download & Verification
+
+```powershell
+$version = "0.16.0"
+
+# Download archive and checksum
+Invoke-WebRequest -Uri "https://github.com/Rohinthan/BountyScope/releases/download/v$version/bountyscope-v$version-windows-x86_64.zip" -OutFile "bountyscope-v$version-windows-x86_64.zip"
+Invoke-WebRequest -Uri "https://github.com/Rohinthan/BountyScope/releases/download/v$version/bountyscope-v$version-windows-x86_64.zip.sha256" -OutFile "bountyscope-v$version-windows-x86_64.zip.sha256"
+
+# Verify SHA-256 hash
+Get-FileHash -Algorithm SHA256 "bountyscope-v$version-windows-x86_64.zip"
+
+# Extract archive
+Expand-Archive -Path "bountyscope-v$version-windows-x86_64.zip" -DestinationPath "$HOME\.cargo\bin" -Force
+```
+
+#### Option 2: Build and Install from Source (`cargo`)
+
+##### Linux & macOS (bash / zsh)
 
 ```bash
 # Clone repository
@@ -81,7 +130,7 @@ export BOUNTYSCOPE_CONFIG="configs/scope.example.yaml"
 bountyscope validate-scope
 ```
 
-#### Windows (PowerShell)
+##### Windows (PowerShell)
 
 ```powershell
 # Clone repository
