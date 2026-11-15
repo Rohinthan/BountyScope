@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "bountyscope")]
-#[command(version = "0.15.0")]
+#[command(version = "0.15.1")]
 #[command(
     about = "Automated vulnerability surface mapping and passive policy verification engine",
     long_about = "BountyScope is an automated vulnerability surface mapping and passive policy verification engine designed for authorized security assessments and bug bounty programs."
@@ -140,6 +140,38 @@ enum Commands {
         stdout: bool,
     },
 
+    /// Compare historical scan snapshots and identify attack surface regressions
+    Diff {
+        /// Path to scope configuration YAML file
+        #[arg(
+            short,
+            long,
+            env = "BOUNTYSCOPE_CONFIG",
+            default_value = "configs/scope.example.yaml"
+        )]
+        config: PathBuf,
+
+        /// Path to local SQLite database file (defaults to data/<program_name>.db)
+        #[arg(short, long)]
+        db: Option<PathBuf>,
+
+        /// Baseline scan run ID to compare from (defaults to second-most-recent run)
+        #[arg(long)]
+        from: Option<i64>,
+
+        /// Target scan run ID to compare to (defaults to latest run)
+        #[arg(long)]
+        to: Option<i64>,
+
+        /// Output file path for Markdown diff report (defaults to data/<program_name>_diff.md unless --stdout is set)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Print diff report directly to standard output
+        #[arg(long, default_value_t = false)]
+        stdout: bool,
+    },
+
     /// Serve native Model Context Protocol (MCP) server over stdio
     Mcp {
         /// Path to scope configuration YAML file
@@ -186,9 +218,17 @@ async fn main() -> Result<()> {
             output,
             stdout,
         }) => execute_report(&config, &db, &output, stdout),
+        Some(Commands::Diff {
+            config,
+            db,
+            from,
+            to,
+            output,
+            stdout,
+        }) => execute_diff(&config, &db, from, to, &output, stdout).await,
         Some(Commands::Mcp { config, db }) => execute_mcp(&config, &db).await,
         None => {
-            println!("BountyScope v0.15.0 - Vulnerability Surface Mapping Engine");
+            println!("BountyScope v0.15.1 - Vulnerability Surface Mapping Engine");
             println!("Run 'bountyscope --help' for available commands.");
             Ok(())
         }
@@ -243,6 +283,30 @@ fn resolve_report_output_path(
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create report directory {:?}", parent))?;
+        }
+    }
+    Ok(Some(path))
+}
+
+fn resolve_diff_output_path(
+    output_arg: &Option<PathBuf>,
+    program_name: &str,
+    stdout: bool,
+) -> Result<Option<PathBuf>> {
+    if stdout {
+        return Ok(None);
+    }
+    let path = match output_arg {
+        Some(p) => p.clone(),
+        None => {
+            let sanitized = sanitize_name(program_name);
+            PathBuf::from(format!("data/{sanitized}_diff.md"))
+        }
+    };
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create diff report directory {:?}", parent))?;
         }
     }
     Ok(Some(path))
@@ -362,6 +426,12 @@ async fn execute_scan(
         .with_context(|| format!("Failed to write report to {:?}", out_path))?;
 
     println!("Assessment report generated successfully: {:?}", out_path);
+
+    // Record scan snapshot for regression monitoring
+    let snapshot_id = storage
+        .record_scan_snapshot(&program_id)
+        .with_context(|| "Failed to record scan snapshot")?;
+    println!("Scan snapshot #{snapshot_id} recorded for regression monitoring.");
 
     Ok(())
 }
@@ -512,6 +582,12 @@ async fn execute_audit(config_path: &PathBuf, db_arg: &Option<PathBuf>) -> Resul
     println!("  LOW:      {}", summary.low_count);
     println!("  INFO:     {}", summary.info_count);
 
+    // Record scan snapshot for regression monitoring
+    let snapshot_id = storage
+        .record_scan_snapshot(&program.id)
+        .with_context(|| "Failed to record scan snapshot")?;
+    println!("Scan snapshot #{snapshot_id} recorded for regression monitoring.");
+
     Ok(())
 }
 
@@ -551,6 +627,103 @@ fn execute_report(
         }
         None => {
             println!("{report_content}");
+        }
+    }
+
+    Ok(())
+}
+
+async fn execute_diff(
+    config_path: &PathBuf,
+    db_arg: &Option<PathBuf>,
+    from_arg: Option<i64>,
+    to_arg: Option<i64>,
+    output_arg: &Option<PathBuf>,
+    stdout: bool,
+) -> Result<()> {
+    let config = ScopeConfig::from_file(config_path)
+        .with_context(|| format!("Failed to load scope configuration from {:?}", config_path))?;
+
+    let db_path = resolve_db_path(db_arg, &config.program_name)?;
+    let storage = StorageEngine::open(&db_path)
+        .with_context(|| format!("Failed to initialize database at {:?}", db_path))?;
+
+    let program = storage
+        .get_program_by_name(&config.program_name)
+        .with_context(|| format!("Program '{}' not found in database.", config.program_name))?;
+
+    let diff = match (from_arg, to_arg) {
+        (Some(from), Some(to)) => storage
+            .compute_diff_between_runs(&program.id, from, to)
+            .with_context(|| format!("Failed to compute diff between run #{from} and #{to}"))?,
+        (Some(from), None) => {
+            let runs = storage
+                .get_scan_runs(&program.id)
+                .with_context(|| "Failed to query historical scan runs")?;
+            let latest = runs.first().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No historical scan runs found for program '{}'",
+                    config.program_name
+                )
+            })?;
+            storage
+                .compute_diff_between_runs(&program.id, from, latest.id)
+                .with_context(|| {
+                    format!(
+                        "Failed to compute diff between run #{from} and #{latest_id}",
+                        latest_id = latest.id
+                    )
+                })?
+        }
+        (None, Some(to)) => {
+            let runs = storage
+                .get_scan_runs(&program.id)
+                .with_context(|| "Failed to query historical scan runs")?;
+            let to_idx = runs
+                .iter()
+                .position(|r| r.id == to)
+                .ok_or_else(|| anyhow::anyhow!("Target scan run #{to} not found in database"))?;
+            let prev_run = runs
+                .get(to_idx + 1)
+                .ok_or_else(|| anyhow::anyhow!("No baseline scan run found prior to run #{to}"))?;
+            storage
+                .compute_diff_between_runs(&program.id, prev_run.id, to)
+                .with_context(|| {
+                    format!(
+                        "Failed to compute diff between run #{prev_id} and #{to}",
+                        prev_id = prev_run.id
+                    )
+                })?
+        }
+        (None, None) => storage
+            .compute_latest_diff(&program.id)
+            .with_context(|| "Failed to compute diff between latest scan runs")?,
+    };
+
+    let report_content = ReportGenerator::generate_diff_markdown(&diff);
+
+    match resolve_diff_output_path(output_arg, &config.program_name, stdout)? {
+        Some(out_path) => {
+            ReportGenerator::write_to_file(&report_content, &out_path)
+                .with_context(|| format!("Failed to write diff report to {:?}", out_path))?;
+            println!("Diff report generated successfully: {:?}", out_path);
+            println!("Summary:");
+            println!(
+                "  Baseline Run: #{} ({})",
+                diff.baseline_run.id, diff.baseline_run.created_at
+            );
+            println!(
+                "  Current Run:  #{} ({})",
+                diff.current_run.id, diff.current_run.created_at
+            );
+            println!("  New Endpoints:       {}", diff.new_endpoints.len());
+            println!("  Removed Endpoints:   {}", diff.removed_endpoints.len());
+            println!("  Status Transitions:  {}", diff.status_changes.len());
+            println!("  New Findings (Regr): {}", diff.new_findings.len());
+            println!("  Resolved Findings:   {}", diff.resolved_findings.len());
+        }
+        None => {
+            print!("{report_content}");
         }
     }
 

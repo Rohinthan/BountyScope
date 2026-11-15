@@ -56,7 +56,7 @@ async fn test_end_to_end_mcp_session_over_duplex_stream() {
         .expect("upsert finding failed");
 
     let enforcer = ScopeEnforcer::new(config).expect("enforcer creation failed");
-    let server = BountyScopeMcpServer::new(enforcer, storage);
+    let server = BountyScopeMcpServer::new(enforcer, storage.clone());
 
     // 2. Establish in-memory duplex transport
     let (server_stream, client_stream) = tokio::io::duplex(65536);
@@ -307,7 +307,64 @@ async fn test_end_to_end_mcp_session_over_duplex_stream() {
     assert!(report_text.contains("https://example.com/api/v1/profile"));
     assert!(report_text.contains("CORS credentials reflection"));
 
-    // 11. Clean shutdown: Drop client write half to signal EOF
+    // 11. Record snapshots and call tool: diff_latest_scans
+    let run1 = storage
+        .record_scan_snapshot(&program_id)
+        .expect("record run 1 failed");
+
+    // Add new endpoint
+    let ep2 = EndpointEntry {
+        program_id: program_id.clone(),
+        url: "https://example.com/api/v2/tokens".to_string(),
+        host: "example.com".to_string(),
+        path: "/api/v2/tokens".to_string(),
+        method: "POST".to_string(),
+        discovered_via: "spec".to_string(),
+        status_code: Some(201),
+        response_size: Some(64),
+        content_type: Some("application/json".to_string()),
+    };
+    storage.upsert_endpoint(&ep2).expect("upsert ep2 failed");
+    let run2 = storage
+        .record_scan_snapshot(&program_id)
+        .expect("record run 2 failed");
+
+    let call_diff = json!({
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "tools/call",
+        "params": {
+            "name": "diff_latest_scans",
+            "arguments": {
+                "from_run_id": run1,
+                "to_run_id": run2
+            }
+        }
+    });
+    client_write
+        .write_all(format!("{}\n", call_diff).as_bytes())
+        .await
+        .expect("write call 8 failed");
+    client_write.flush().await.expect("flush failed");
+
+    let resp8_line = client_lines
+        .next_line()
+        .await
+        .expect("read line failed")
+        .expect("missing resp8");
+    let resp8: serde_json::Value = serde_json::from_str(&resp8_line).expect("parse json failed");
+    assert_eq!(resp8["id"], 8);
+    let diff_content = &resp8["result"]["structuredContent"];
+    assert_eq!(diff_content["program_name"], "mcp-duplex-test-app");
+    assert_eq!(
+        diff_content["new_endpoints"][0],
+        "https://example.com/api/v2/tokens"
+    );
+    let diff_md = diff_content["markdown_report"].as_str().expect("diff md");
+    assert!(diff_md.contains("# Scan Regression & Attack Surface Diff: mcp-duplex-test-app"));
+    assert!(diff_md.contains("https://example.com/api/v2/tokens"));
+
+    // 12. Clean shutdown: Drop client write half to signal EOF
     drop(client_write);
     drop(client_lines);
 

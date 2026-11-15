@@ -1,6 +1,6 @@
 # BountyScope Consolidated Technical Reference
 
-**Document Version:** 0.15.0  
+**Document Version:** 0.15.1  
 **Specification Level:** Final Technical Reference  
 **Applicability:** `bountyscope` CLI and Core Subsystems  
 
@@ -231,10 +231,38 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 6. Historical scan execution snapshots (user_version = 2)
+CREATE TABLE IF NOT EXISTS scan_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    program_id TEXT NOT NULL REFERENCES programs(id) ON DELETE CASCADE,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    endpoints_count INTEGER NOT NULL,
+    findings_count INTEGER NOT NULL
+);
+
+-- 7. Snapshot item breakdown for regression diffing
+CREATE TABLE IF NOT EXISTS scan_snapshot_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_run_id INTEGER NOT NULL REFERENCES scan_runs(id) ON DELETE CASCADE,
+    item_type TEXT NOT NULL,
+    item_key TEXT NOT NULL,
+    status_or_severity TEXT NOT NULL,
+    summary TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_endpoints_host ON endpoints(host);
 CREATE INDEX IF NOT EXISTS idx_findings_program ON findings(program_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp);
+CREATE INDEX IF NOT EXISTS idx_scan_runs_program ON scan_runs(program_id);
+CREATE INDEX IF NOT EXISTS idx_scan_snapshot_items_run ON scan_snapshot_items(scan_run_id);
 ```
+
+### Deterministic Schema Versioning & Migrations (`PRAGMA user_version`)
+
+BountyScope enforces database migrations deterministically using SQLite's native `PRAGMA user_version`:
+- **Version 0 to 1:** Automatically adds `policy_url TEXT` to legacy `programs` tables without data loss.
+- **Version 1 to 2:** Deterministically provisions `scan_runs` and `scan_snapshot_items` with cascading foreign keys and indexes.
+- **Idempotency:** Fresh database initializations advance directly to `user_version = 2`; re-opening existing databases bypasses redundant DDL statements.
 
 ---
 
@@ -312,7 +340,10 @@ bountyscope audit [--config <path>] [--db <path>]
 # 6. Generate Markdown assessment report
 bountyscope report [--config <path>] [--db <path>] [--output <file.md>] [--stdout]
 
-# 7. Start Model Context Protocol (MCP) server
+# 7. Compare scan snapshots and track regressions
+bountyscope diff [--config <path>] [--db <path>] [--from <run_id>] [--to <run_id>] [--output <file.md>] [--stdout]
+
+# 8. Start Model Context Protocol (MCP) server
 bountyscope mcp [--config <path>] [--db <path>]
 ```
 
@@ -327,6 +358,7 @@ The MCP server implements JSON-RPC 2.0 over standard I/O streams (`stdio`) via `
 2. `list_mapped_endpoints`: Returns paginated lists of discovered endpoints for the active program.
 3. `list_security_findings`: Returns security findings filtered optionally by minimum severity (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO`).
 4. `generate_assessment_report`: Compiles and returns the complete Markdown assessment report.
+5. `diff_latest_scans`: Compares historical scan runs to detect regressions, status transitions, and surface additions (`{"from_run_id": Option<i64>, "to_run_id": Option<i64>}`).
 
 ---
 

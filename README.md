@@ -1,6 +1,6 @@
 # BountyScope
 
-[![Version](https://img.shields.io/badge/version-0.15.0-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.15.1-blue.svg)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
 BountyScope is a scope-locked reconnaissance, passive policy auditing, and Model Context Protocol (MCP) triage command-line interface written in Rust. It is engineered for authorized bug bounty programs, defensive security reviews, and vulnerability disclosure assessments. The system guarantees strict scope boundaries, non-destructive policy evaluation, deterministic rate limiting, and compile-time target verification before executing any network interactions.
@@ -268,6 +268,7 @@ Similarly, `--output` on `report` and `scan` defaults to `data/<sanitized_progra
 | `map` | Passively extracts links, scripts, and API specs from a seed URL. | `--url`, `[--config]`, `[--db]` | Discovered endpoints in SQLite |
 | `audit` | Evaluates HTTP headers, CORS policies, and spec disclosures. | `[--config]`, `[--db]` | Audit findings summary |
 | `report` | Generates a Markdown assessment report with findings and evidence. | `[--config]`, `[--db]`, `[--output]`, `[--stdout]` | Markdown report (file or stdout) |
+| `diff` | Compares historical scan snapshots to identify regressions, status transitions, and surface deltas. | `[--config]`, `[--db]`, `[--from]`, `[--to]`, `[--output]`, `[--stdout]` | Markdown diff report (file or stdout) |
 | `mcp` | Launches the Model Context Protocol server over standard I/O (`stdio`). | `[--config]`, `[--db]` | JSON-RPC 2.0 protocol on stdout |
 
 ### Lifecycle & State Modifications (What Changes on Each Run)
@@ -282,6 +283,7 @@ Understanding the exact network, database, and filesystem modifications executed
 | `map` | Sends rate-limited GET requests to crawl HTML links, script tags, routes, and `robots.txt` | Upserts discovered URLs into `endpoints`; appends each request to `audit_logs` | Creates/updates `data/<program>.db` | Re-running updates `last_verified_at` timestamps on existing endpoints without creating duplicate rows. |
 | `audit` | Sends non-destructive GET requests with audit test headers (CORS origins, spec paths) | Upserts policy violations into `findings`; appends each check to `audit_logs` | Updates `data/<program>.db` | Re-running updates existing finding evidence in place; does not multiply finding counts. |
 | `report` | **Zero requests** (Offline) | **None** (Read-only query of existing records) | Writes or updates `data/<program>_report.md` (or prints to terminal if `--stdout` is set) | Completely idempotent; reconstructs the report directly from current database state. |
+| `diff` | **Zero requests** (Offline) | **None** (Read-only query of historical snapshots) | Writes `data/<program>_diff.md` (or prints to terminal if `--stdout` is set) | Completely idempotent; compares historical snapshot runs without mutating database. |
 | `mcp` | Zero autonomous requests (Queries driven by connected AI assistant) | Reads `endpoints` and `findings`; evaluates scope boundaries via `ScopeEnforcer` | **None** (Communicates over stdio JSON-RPC 2.0) | Continuous streaming process. |
 
 #### Idempotency Invariant
@@ -386,7 +388,28 @@ bountyscope report --config configs/scope.example.yaml
 bountyscope report --config configs/scope.example.yaml --stdout
 ```
 
-### 7. Serve Model Context Protocol (MCP)
+### 7. Historical Regression & Attack Surface Diffing (`bountyscope diff`)
+
+At the conclusion of every `bountyscope scan` and `bountyscope audit`, an immutable scan snapshot is persisted to SQLite (`scan_runs` and `scan_snapshot_items`, `PRAGMA user_version = 2`). The `diff` command compares snapshots across runs to track surface evolution and regressions:
+
+- **New Endpoints:** Detects newly exposed routes or services added to the attack surface.
+- **Removed Endpoints:** Identifies retired or inaccessible URLs.
+- **HTTP Status Transitions:** Detects security-critical shifts (such as `403 Forbidden` becoming `200 OK`).
+- **New Findings (Regressions):** Immediately surfaces new policy violations or configuration weaknesses.
+- **Resolved Findings:** Confirms verified remediations between historical assessments.
+
+```bash
+# Compare the two most recent scans and write Markdown report to data/<program>_diff.md
+bountyscope diff --config configs/scope.example.yaml
+
+# Print diff report directly to standard output
+bountyscope diff --config configs/scope.example.yaml --stdout
+
+# Compare specific historical scan runs
+bountyscope diff --from 1 --to 2 --config configs/scope.example.yaml
+```
+
+### 8. Serve Model Context Protocol (MCP)
 
 ```bash
 bountyscope mcp --config configs/scope.example.yaml
@@ -419,6 +442,11 @@ BountyScope implements a native Model Context Protocol (MCP) server conforming t
    - **Input:** `{}`
    - **Output:** `{ "report": "# Security Assessment Report: ...\n..." }`
    - **Function:** Returns the full synthesized Markdown assessment report.
+
+5. **`diff_latest_scans`**
+   - **Input:** `{ "from_run_id": 1, "to_run_id": 2 }` (both optional; defaults to comparing the latest two scan runs)
+   - **Output:** Structured delta summary including `new_endpoints`, `removed_endpoints`, `status_changes`, `new_findings`, `resolved_findings`, and full `markdown_report`.
+   - **Function:** Computes regressions and attack surface differences between historical scan runs.
 
 ### MCP Client Configuration
 

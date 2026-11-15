@@ -75,6 +75,17 @@ pub struct FindingSummary {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct GenerateAssessmentReportRequest {}
 
+/// Parameter schema for the `diff_latest_scans` tool.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct DiffLatestScansRequest {
+    /// Baseline scan run ID (defaults to previous scan run).
+    #[serde(default)]
+    pub from_run_id: Option<i64>,
+    /// Target scan run ID (defaults to latest scan run).
+    #[serde(default)]
+    pub to_run_id: Option<i64>,
+}
+
 /// Native Model Context Protocol (MCP) server for BountyScope.
 ///
 /// Exposes read-only and scope-verification tools over JSON-RPC 2.0 to authorized MCP clients:
@@ -82,6 +93,7 @@ pub struct GenerateAssessmentReportRequest {}
 /// - `list_mapped_endpoints`: Lists stored surface endpoints for the active program.
 /// - `list_security_findings`: Retrieves security verification findings with severity filtering.
 /// - `generate_assessment_report`: Renders the complete Markdown assessment report.
+/// - `diff_latest_scans`: Computes regressions and attack surface differences between historical scan runs.
 #[derive(Clone)]
 pub struct BountyScopeMcpServer {
     enforcer: ScopeEnforcer,
@@ -93,9 +105,9 @@ pub struct BountyScopeMcpServer {
 impl ServerHandler for BountyScopeMcpServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("bountyscope", "0.15.0"))
+            .with_server_info(Implementation::new("bountyscope", "0.15.1"))
             .with_instructions(
-                "BountyScope Model Context Protocol server exposing scope validation, mapped endpoints, security findings, and assessment reports.",
+                "BountyScope Model Context Protocol server exposing scope validation, mapped endpoints, security findings, assessment reports, and historical regression diffs.",
             )
     }
 }
@@ -193,6 +205,84 @@ impl BountyScopeMcpServer {
             })),
             Err(err) => CallToolResult::structured_error(serde_json::json!({
                 "error": "ReportGenerationError",
+                "message": err.to_string(),
+            })),
+        }
+    }
+
+    /// Computes regressions and attack surface differences between historical scan runs.
+    #[tool(
+        name = "diff_latest_scans",
+        description = "Computes regressions and attack surface differences between historical scan runs."
+    )]
+    pub async fn diff_latest_scans(
+        &self,
+        Parameters(params): Parameters<DiffLatestScansRequest>,
+    ) -> CallToolResult {
+        let program_name = &self.enforcer.config().program_name;
+        let program = match self.storage.get_program_by_name(program_name) {
+            Ok(p) => p,
+            Err(e) => {
+                return CallToolResult::structured_error(serde_json::json!({
+                    "error": "ProgramNotFound",
+                    "message": e.to_string(),
+                }));
+            }
+        };
+
+        let diff_res = match (params.from_run_id, params.to_run_id) {
+            (Some(from), Some(to)) => self
+                .storage
+                .compute_diff_between_runs(&program.id, from, to),
+            (Some(from), None) => match self.storage.get_scan_runs(&program.id) {
+                Ok(runs) => match runs.first() {
+                    Some(latest) => {
+                        self.storage
+                            .compute_diff_between_runs(&program.id, from, latest.id)
+                    }
+                    None => Err(crate::error::StorageError::NotFound(
+                        "No historical scan runs found".to_string(),
+                    )),
+                },
+                Err(e) => Err(e),
+            },
+            (None, Some(to)) => match self.storage.get_scan_runs(&program.id) {
+                Ok(runs) => match runs.iter().position(|r| r.id == to) {
+                    Some(idx) => match runs.get(idx + 1) {
+                        Some(prev) => {
+                            self.storage
+                                .compute_diff_between_runs(&program.id, prev.id, to)
+                        }
+                        None => Err(crate::error::StorageError::NotFound(format!(
+                            "No baseline run found prior to run #{to}"
+                        ))),
+                    },
+                    None => Err(crate::error::StorageError::NotFound(format!(
+                        "Scan run #{to} not found"
+                    ))),
+                },
+                Err(e) => Err(e),
+            },
+            (None, None) => self.storage.compute_latest_diff(&program.id),
+        };
+
+        match diff_res {
+            Ok(diff) => {
+                let markdown_report = ReportGenerator::generate_diff_markdown(&diff);
+                CallToolResult::structured(serde_json::json!({
+                    "program_name": diff.program_name,
+                    "baseline_run": diff.baseline_run,
+                    "current_run": diff.current_run,
+                    "new_endpoints": diff.new_endpoints,
+                    "removed_endpoints": diff.removed_endpoints,
+                    "status_changes": diff.status_changes,
+                    "new_findings": diff.new_findings,
+                    "resolved_findings": diff.resolved_findings,
+                    "markdown_report": markdown_report,
+                }))
+            }
+            Err(err) => CallToolResult::structured_error(serde_json::json!({
+                "error": "DiffCalculationError",
                 "message": err.to_string(),
             })),
         }
@@ -368,7 +458,7 @@ mod tests {
         let _ = storage
             .upsert_program_scope(&config)
             .expect("upsert failed");
-        let server = BountyScopeMcpServer::new(enforcer, storage);
+        let server = BountyScopeMcpServer::new(enforcer, storage.clone());
 
         // In-scope evaluation
         let in_scope = server.evaluate_scope("https://example.com/api/v1/users");
@@ -420,7 +510,7 @@ mod tests {
             storage.upsert_endpoint(&ep).expect("upsert ep failed");
         }
 
-        let server = BountyScopeMcpServer::new(enforcer, storage);
+        let server = BountyScopeMcpServer::new(enforcer, storage.clone());
 
         let all = server.query_endpoints(None).expect("query all failed");
         assert_eq!(all.len(), 5);
@@ -479,7 +569,7 @@ mod tests {
         };
         storage.upsert_finding(&f_low).expect("upsert f2 failed");
 
-        let server = BountyScopeMcpServer::new(enforcer, storage);
+        let server = BountyScopeMcpServer::new(enforcer, storage.clone());
 
         let all_findings = server.query_findings(None).expect("query all failed");
         assert_eq!(all_findings.len(), 2);
@@ -519,7 +609,7 @@ mod tests {
         };
         storage.upsert_endpoint(&ep).expect("upsert ep failed");
 
-        let server = BountyScopeMcpServer::new(enforcer, storage);
+        let server = BountyScopeMcpServer::new(enforcer, storage.clone());
         let report = server.render_report().expect("render report failed");
 
         assert!(report.contains("# Security Assessment Report: mcp-test-app"));
@@ -550,7 +640,7 @@ mod tests {
         };
         storage.upsert_endpoint(&ep).expect("upsert ep failed");
 
-        let server = BountyScopeMcpServer::new(enforcer, storage);
+        let server = BountyScopeMcpServer::new(enforcer, storage.clone());
 
         // 1. check_target_scope
         let res1 = server
@@ -588,5 +678,43 @@ mod tests {
             .as_str()
             .expect("report str")
             .contains("mcp-test-app"));
+
+        // 5. diff_latest_scans (fewer than 2 runs returns structured error)
+        let res5_err = server
+            .diff_latest_scans(Parameters(DiffLatestScansRequest::default()))
+            .await;
+        assert_eq!(res5_err.is_error, Some(true));
+
+        // Record Run 1
+        let run1 = storage.record_scan_snapshot(&program_id).expect("run 1");
+
+        // Add second endpoint and record Run 2
+        let ep2 = EndpointEntry {
+            program_id: program_id.clone(),
+            url: "https://example.com/api/v2/items".to_string(),
+            host: "example.com".to_string(),
+            path: "/api/v2/items".to_string(),
+            method: "GET".to_string(),
+            discovered_via: "spec".to_string(),
+            status_code: Some(200),
+            response_size: Some(40),
+            content_type: Some("application/json".to_string()),
+        };
+        storage.upsert_endpoint(&ep2).expect("upsert ep2 failed");
+        let run2 = storage.record_scan_snapshot(&program_id).expect("run 2");
+
+        let res5 = server
+            .diff_latest_scans(Parameters(DiffLatestScansRequest {
+                from_run_id: Some(run1),
+                to_run_id: Some(run2),
+            }))
+            .await;
+        assert_eq!(res5.is_error, Some(false));
+        let val5 = res5.structured_content.expect("structured content");
+        assert_eq!(val5["new_endpoints"][0], "https://example.com/api/v2/items");
+        assert!(val5["markdown_report"]
+            .as_str()
+            .expect("md report")
+            .contains("New Endpoints Discovered (1)"));
     }
 }

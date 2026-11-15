@@ -1,6 +1,6 @@
 use crate::error::ReportError;
 use crate::scope::ScopeConfig;
-use crate::storage::{EndpointRecord, FindingRecord, ProgramRecord};
+use crate::storage::{EndpointRecord, FindingRecord, ProgramRecord, ScanDiff};
 use std::fs;
 use std::path::Path;
 
@@ -212,6 +212,161 @@ impl ReportGenerator {
         fs::write(path, report_content)?;
         Ok(())
     }
+
+    /// Renders a Markdown regression and attack surface diff report.
+    pub fn generate_diff_markdown(diff: &ScanDiff) -> String {
+        let mut doc = String::new();
+
+        // 1. Header and Executive Delta Summary
+        doc.push_str(&format!(
+            "# Scan Regression & Attack Surface Diff: {}\n\n",
+            diff.program_name
+        ));
+        doc.push_str("## Executive Delta Summary\n\n");
+        doc.push_str(&format!("- **Program Name:** {}\n", diff.program_name));
+        doc.push_str(&format!(
+            "- **Baseline Scan:** Run #{} (`{}`)\n",
+            diff.baseline_run.id, diff.baseline_run.created_at
+        ));
+        doc.push_str(&format!(
+            "- **Current Scan:** Run #{} (`{}`)\n\n",
+            diff.current_run.id, diff.current_run.created_at
+        ));
+
+        let ep_delta =
+            diff.current_run.endpoints_count as i64 - diff.baseline_run.endpoints_count as i64;
+        let ep_delta_str = if ep_delta > 0 {
+            format!("+{ep_delta}")
+        } else {
+            ep_delta.to_string()
+        };
+
+        let f_delta =
+            diff.current_run.findings_count as i64 - diff.baseline_run.findings_count as i64;
+        let f_delta_str = if f_delta > 0 {
+            format!("+{f_delta}")
+        } else {
+            f_delta.to_string()
+        };
+
+        doc.push_str("| Metric | Baseline | Current | Delta |\n");
+        doc.push_str("| :--- | :--- | :--- | :---: |\n");
+        doc.push_str(&format!(
+            "| **Total Endpoints** | {} | {} | {} |\n",
+            diff.baseline_run.endpoints_count, diff.current_run.endpoints_count, ep_delta_str
+        ));
+        doc.push_str(&format!(
+            "| **Total Findings** | {} | {} | {} |\n",
+            diff.baseline_run.findings_count, diff.current_run.findings_count, f_delta_str
+        ));
+        doc.push_str(&format!(
+            "| **New Endpoints** | - | - | +{} |\n",
+            diff.new_endpoints.len()
+        ));
+        doc.push_str(&format!(
+            "| **Removed Endpoints** | - | - | -{} |\n",
+            diff.removed_endpoints.len()
+        ));
+        doc.push_str(&format!(
+            "| **Status Transitions** | - | - | {} |\n",
+            diff.status_changes.len()
+        ));
+        doc.push_str(&format!(
+            "| **New Findings (Regressions)** | - | - | +{} |\n",
+            diff.new_findings.len()
+        ));
+        doc.push_str(&format!(
+            "| **Resolved Findings** | - | - | -{} |\n\n",
+            diff.resolved_findings.len()
+        ));
+
+        // 2. New Endpoints
+        doc.push_str(&format!(
+            "## New Endpoints Discovered ({})\n\n",
+            diff.new_endpoints.len()
+        ));
+        if diff.new_endpoints.is_empty() {
+            doc.push_str("_No new surface endpoints discovered._\n\n");
+        } else {
+            for ep in &diff.new_endpoints {
+                doc.push_str(&format!("- `{ep}`\n"));
+            }
+            doc.push('\n');
+        }
+
+        // 3. HTTP Status Transitions
+        doc.push_str(&format!(
+            "## HTTP Status Transitions ({})\n\n",
+            diff.status_changes.len()
+        ));
+        if diff.status_changes.is_empty() {
+            doc.push_str("_No endpoint HTTP status code transitions observed._\n\n");
+        } else {
+            doc.push_str("| Endpoint URL | Baseline Status | Current Status |\n");
+            doc.push_str("| :--- | :---: | :---: |\n");
+            for change in &diff.status_changes {
+                doc.push_str(&format!(
+                    "| `{}` | `{}` | `{}` |\n",
+                    change.url, change.baseline_status, change.current_status
+                ));
+            }
+            doc.push('\n');
+        }
+
+        // 4. New Findings (Regressions)
+        doc.push_str(&format!(
+            "## New Security Findings / Regressions ({})\n\n",
+            diff.new_findings.len()
+        ));
+        if diff.new_findings.is_empty() {
+            doc.push_str("_No new security findings or regressions identified._\n\n");
+        } else {
+            doc.push_str("| Severity | Finding Type | Target URL | Title |\n");
+            doc.push_str("| :--- | :--- | :--- | :--- |\n");
+            for f in &diff.new_findings {
+                doc.push_str(&format!(
+                    "| **{}** | `{}` | `{}` | {} |\n",
+                    f.severity, f.finding_type, f.target_url, f.title
+                ));
+            }
+            doc.push('\n');
+        }
+
+        // 5. Resolved Findings
+        doc.push_str(&format!(
+            "## Resolved Security Findings ({})\n\n",
+            diff.resolved_findings.len()
+        ));
+        if diff.resolved_findings.is_empty() {
+            doc.push_str("_No previously reported security findings were resolved._\n\n");
+        } else {
+            doc.push_str("| Baseline Severity | Finding Type | Target URL | Title |\n");
+            doc.push_str("| :--- | :--- | :--- | :--- |\n");
+            for f in &diff.resolved_findings {
+                doc.push_str(&format!(
+                    "| **{}** | `{}` | `{}` | {} |\n",
+                    f.severity, f.finding_type, f.target_url, f.title
+                ));
+            }
+            doc.push('\n');
+        }
+
+        // 6. Removed Endpoints
+        doc.push_str(&format!(
+            "## Removed Surface Endpoints ({})\n\n",
+            diff.removed_endpoints.len()
+        ));
+        if diff.removed_endpoints.is_empty() {
+            doc.push_str("_No surface endpoints were removed._\n\n");
+        } else {
+            for ep in &diff.removed_endpoints {
+                doc.push_str(&format!("- `{ep}`\n"));
+            }
+            doc.push('\n');
+        }
+
+        doc
+    }
 }
 
 #[cfg(test)]
@@ -280,5 +435,63 @@ mod tests {
         assert!(md.contains("https://hackerone.com/example-program/policy"));
         assert!(md.contains("security-researcher"));
         assert!(md.contains("missing_security_headers"));
+    }
+
+    #[test]
+    fn test_diff_markdown_report_formatting() {
+        use crate::storage::{DiffFindingItem, EndpointStatusChange, ScanRunRecord};
+
+        let diff = ScanDiff {
+            program_id: "prog-1".to_string(),
+            program_name: "diff-test-app".to_string(),
+            baseline_run: ScanRunRecord {
+                id: 1,
+                program_id: "prog-1".to_string(),
+                created_at: "2026-11-15 10:00:00".to_string(),
+                endpoints_count: 5,
+                findings_count: 2,
+            },
+            current_run: ScanRunRecord {
+                id: 2,
+                program_id: "prog-1".to_string(),
+                created_at: "2026-11-15 11:00:00".to_string(),
+                endpoints_count: 6,
+                findings_count: 2,
+            },
+            new_endpoints: vec!["https://example.com/api/v2/new".to_string()],
+            removed_endpoints: vec!["https://example.com/api/v1/old".to_string()],
+            status_changes: vec![EndpointStatusChange {
+                url: "https://example.com/api/v1/login".to_string(),
+                baseline_status: "403".to_string(),
+                current_status: "200".to_string(),
+            }],
+            new_findings: vec![DiffFindingItem {
+                item_key: "cors_misconfiguration::https://example.com/api/v2/new".to_string(),
+                finding_type: "cors_misconfiguration".to_string(),
+                target_url: "https://example.com/api/v2/new".to_string(),
+                severity: "HIGH".to_string(),
+                title: "CORS reflection on v2 API".to_string(),
+            }],
+            resolved_findings: vec![DiffFindingItem {
+                item_key: "information_disclosure::https://example.com/api/v1/old".to_string(),
+                finding_type: "information_disclosure".to_string(),
+                target_url: "https://example.com/api/v1/old".to_string(),
+                severity: "LOW".to_string(),
+                title: "Server header disclosure".to_string(),
+            }],
+        };
+
+        let md = ReportGenerator::generate_diff_markdown(&diff);
+
+        assert!(md.contains("# Scan Regression & Attack Surface Diff: diff-test-app"));
+        assert!(md.contains("Run #1 (`2026-11-15 10:00:00`)"));
+        assert!(md.contains("Run #2 (`2026-11-15 11:00:00`)"));
+        assert!(md.contains("**Total Endpoints** | 5 | 6 | +1"));
+        assert!(md.contains("`https://example.com/api/v2/new`"));
+        assert!(md.contains("`https://example.com/api/v1/old`"));
+        assert!(md.contains("`https://example.com/api/v1/login`"));
+        assert!(md.contains("`403` | `200`"));
+        assert!(md.contains("CORS reflection on v2 API"));
+        assert!(md.contains("Server header disclosure"));
     }
 }

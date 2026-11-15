@@ -132,10 +132,12 @@ excluded_checks: []
     assert!(stdout.contains("Starting non-destructive security verification"));
     assert!(stdout.contains("Audit completed:"));
     assert!(stdout.contains("Assessment report generated successfully:"));
+    assert!(stdout.contains("Scan snapshot #1 recorded for regression monitoring."));
 
     // Verify default database and default Markdown report exist
     let default_db = PathBuf::from("data/cli_unified_test.db");
     let default_report = PathBuf::from("data/cli_unified_test_report.md");
+    let default_diff = PathBuf::from("data/cli_unified_test_diff.md");
 
     assert!(
         default_db.exists(),
@@ -153,9 +155,62 @@ excluded_checks: []
     assert!(report_content.contains("# Security Assessment Report: cli-unified-test"));
     assert!(report_content.contains("cli-tester"));
 
+    // 2. Diff with only 1 snapshot must fail cleanly
+    let diff_out1 = Command::new(bin_path)
+        .arg("diff")
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .expect("bountyscope diff execution failed");
+    assert!(
+        !diff_out1.status.success(),
+        "diff should fail when fewer than 2 snapshots exist"
+    );
+
+    // 3. Run second scan to record snapshot #2
+    let scan2_out = Command::new(bin_path)
+        .arg("scan")
+        .arg("--url")
+        .arg(&seed_url)
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .expect("bountyscope scan 2 failed");
+    assert!(scan2_out.status.success());
+    let scan2_stdout = String::from_utf8_lossy(&scan2_out.stdout);
+    assert!(scan2_stdout.contains("Scan snapshot #2 recorded for regression monitoring."));
+
+    // 4. Run diff with --stdout
+    let diff_stdout_out = Command::new(bin_path)
+        .arg("diff")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--stdout")
+        .output()
+        .expect("bountyscope diff --stdout execution failed");
+    assert!(diff_stdout_out.status.success());
+    let diff_stdout_str = String::from_utf8_lossy(&diff_stdout_out.stdout);
+    assert!(diff_stdout_str.contains("# Scan Regression & Attack Surface Diff: cli-unified-test"));
+    assert!(diff_stdout_str.contains("Baseline Scan:"));
+
+    // 5. Run diff generating default diff file
+    let diff_file_out = Command::new(bin_path)
+        .arg("diff")
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .expect("bountyscope diff execution failed");
+    assert!(diff_file_out.status.success());
+    assert!(
+        default_diff.exists(),
+        "Default diff file {:?} should exist",
+        default_diff
+    );
+
     // Cleanup generated default files
     let _ = std::fs::remove_file(&default_db);
     let _ = std::fs::remove_file(&default_report);
+    let _ = std::fs::remove_file(&default_diff);
 }
 
 #[test]

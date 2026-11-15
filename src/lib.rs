@@ -16,7 +16,8 @@ pub use mcp::BountyScopeMcpServer;
 pub use report::ReportGenerator;
 pub use scope::{normalize_path, ScopeConfig, ScopeEnforcer, VerifiedScopeUrl};
 pub use storage::{
-    AuditLogEntry, AuditLogRecord, EndpointEntry, EndpointRecord, FindingEntry, FindingRecord,
-    ProgramRecord, StorageEngine,
+    AuditLogEntry, AuditLogRecord, DiffFindingItem, EndpointEntry, EndpointRecord,
+    EndpointStatusChange, FindingEntry, FindingRecord, ProgramRecord, ScanDiff, ScanRunRecord,
+    ScanSnapshotItemRecord, StorageEngine,
 };
 pub use verifier::{SafeVerificationRunner, VerificationSummary};

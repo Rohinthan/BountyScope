@@ -1,6 +1,8 @@
 use crate::error::StorageError;
 use crate::scope::ScopeConfig;
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -99,6 +101,59 @@ pub struct FindingRecord {
     pub verified_at: String,
 }
 
+/// Represents a historical scan execution record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanRunRecord {
+    pub id: i64,
+    pub program_id: String,
+    pub created_at: String,
+    pub endpoints_count: usize,
+    pub findings_count: usize,
+}
+
+/// Represents an individual item in a scan snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanSnapshotItemRecord {
+    pub id: i64,
+    pub scan_run_id: i64,
+    pub item_type: String,
+    pub item_key: String,
+    pub status_or_severity: String,
+    pub summary: String,
+}
+
+/// Represents a detected HTTP status code transition between two scan snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointStatusChange {
+    pub url: String,
+    pub baseline_status: String,
+    pub current_status: String,
+}
+
+/// Represents a security finding regression or resolution between scans.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffFindingItem {
+    pub item_key: String,
+    pub finding_type: String,
+    pub target_url: String,
+    pub severity: String,
+    pub title: String,
+}
+
+/// Consolidated differential analysis between two historical scan snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanDiff {
+    pub program_id: String,
+    pub program_name: String,
+    pub baseline_run: ScanRunRecord,
+    pub current_run: ScanRunRecord,
+    pub new_endpoints: Vec<String>,
+    pub removed_endpoints: Vec<String>,
+    pub status_changes: Vec<EndpointStatusChange>,
+    pub new_findings: Vec<DiffFindingItem>,
+    pub resolved_findings: Vec<DiffFindingItem>,
+}
+
 /// Thread-safe SQLite storage engine managing assessment data and audit trails.
 #[derive(Clone)]
 pub struct StorageEngine {
@@ -191,9 +246,28 @@ impl StorageEngine {
             timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS scan_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            program_id TEXT NOT NULL REFERENCES programs(id) ON DELETE CASCADE,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            endpoints_count INTEGER NOT NULL,
+            findings_count INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS scan_snapshot_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_run_id INTEGER NOT NULL REFERENCES scan_runs(id) ON DELETE CASCADE,
+            item_type TEXT NOT NULL,
+            item_key TEXT NOT NULL,
+            status_or_severity TEXT NOT NULL,
+            summary TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_endpoints_host ON endpoints(host);
         CREATE INDEX IF NOT EXISTS idx_findings_program ON findings(program_id);
         CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_scan_runs_program ON scan_runs(program_id);
+        CREATE INDEX IF NOT EXISTS idx_scan_snapshot_items_run ON scan_snapshot_items(scan_run_id);
         "#;
 
         conn.execute_batch(schema)?;
@@ -230,6 +304,32 @@ impl StorageEngine {
             }
 
             conn.pragma_update(None, "user_version", 1)?;
+        }
+
+        if user_version < 2 {
+            let migration_v2 = r#"
+            CREATE TABLE IF NOT EXISTS scan_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                program_id TEXT NOT NULL REFERENCES programs(id) ON DELETE CASCADE,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                endpoints_count INTEGER NOT NULL,
+                findings_count INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS scan_snapshot_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_run_id INTEGER NOT NULL REFERENCES scan_runs(id) ON DELETE CASCADE,
+                item_type TEXT NOT NULL,
+                item_key TEXT NOT NULL,
+                status_or_severity TEXT NOT NULL,
+                summary TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_scan_runs_program ON scan_runs(program_id);
+            CREATE INDEX IF NOT EXISTS idx_scan_snapshot_items_run ON scan_snapshot_items(scan_run_id);
+            "#;
+            conn.execute_batch(migration_v2)?;
+            conn.pragma_update(None, "user_version", 2)?;
         }
 
         Ok(())
@@ -640,6 +740,379 @@ impl StorageEngine {
 
         Ok(findings)
     }
+
+    /// Captures a complete snapshot of all mapped endpoints and findings for the given program.
+    /// Returns the assigned scan run ID.
+    pub fn record_scan_snapshot(&self, program_id: &str) -> Result<i64, StorageError> {
+        let mut conn = self.conn.lock().map_err(|_| StorageError::LockFailure)?;
+        let tx = conn.transaction()?;
+
+        // 1. Fetch current endpoints
+        let endpoints: Vec<(String, String, Option<u16>, String)> = {
+            let mut ep_stmt = tx.prepare(
+                r#"
+                SELECT url, method, status_code, discovered_via
+                FROM endpoints
+                WHERE program_id = ?1
+                ORDER BY url ASC
+                "#,
+            )?;
+            let ep_rows = ep_stmt.query_map(params![program_id], |row| {
+                let status: Option<i32> = row.get(2)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    status.map(|s| s as u16),
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+
+            let mut vec = Vec::new();
+            for r in ep_rows {
+                vec.push(r?);
+            }
+            vec
+        };
+        let endpoints_count = endpoints.len();
+
+        // 2. Fetch current findings with joined target URL
+        let findings: Vec<(String, String, String, String)> = {
+            let mut f_stmt = tx.prepare(
+                r#"
+                SELECT f.finding_type, f.severity, f.title, COALESCE(e.url, 'program')
+                FROM findings f
+                LEFT JOIN endpoints e ON f.endpoint_id = e.id
+                WHERE f.program_id = ?1
+                ORDER BY f.id ASC
+                "#,
+            )?;
+            let f_rows = f_stmt.query_map(params![program_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+
+            let mut vec = Vec::new();
+            for r in f_rows {
+                vec.push(r?);
+            }
+            vec
+        };
+        let findings_count = findings.len();
+
+        // 3. Create scan_runs record
+        tx.execute(
+            r#"
+            INSERT INTO scan_runs (program_id, endpoints_count, findings_count)
+            VALUES (?1, ?2, ?3)
+            "#,
+            params![program_id, endpoints_count as i64, findings_count as i64],
+        )?;
+        let scan_run_id = tx.last_insert_rowid();
+
+        // 4. Insert endpoint snapshot items
+        {
+            let mut item_stmt = tx.prepare(
+                r#"
+                INSERT INTO scan_snapshot_items (scan_run_id, item_type, item_key, status_or_severity, summary)
+                VALUES (?1, 'endpoint', ?2, ?3, ?4)
+                "#,
+            )?;
+            for (url, method, status_code, discovered_via) in &endpoints {
+                let status_str = match status_code {
+                    Some(code) => code.to_string(),
+                    None => "unprobed".to_string(),
+                };
+                let summary = format!("{method} {url} ({discovered_via})");
+                item_stmt.execute(params![scan_run_id, url, status_str, summary])?;
+            }
+        }
+
+        // 5. Insert finding snapshot items
+        {
+            let mut item_stmt = tx.prepare(
+                r#"
+                INSERT INTO scan_snapshot_items (scan_run_id, item_type, item_key, status_or_severity, summary)
+                VALUES (?1, 'finding', ?2, ?3, ?4)
+                "#,
+            )?;
+            for (finding_type, severity, title, target_url) in &findings {
+                let item_key = format!("{finding_type}::{target_url}");
+                item_stmt.execute(params![scan_run_id, item_key, severity, title])?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(scan_run_id)
+    }
+
+    /// Retrieves all historical scan run records for a program, ordered newest to oldest.
+    pub fn get_scan_runs(&self, program_id: &str) -> Result<Vec<ScanRunRecord>, StorageError> {
+        let conn = self.conn.lock().map_err(|_| StorageError::LockFailure)?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, program_id, created_at, endpoints_count, findings_count
+            FROM scan_runs
+            WHERE program_id = ?1
+            ORDER BY id DESC
+            "#,
+        )?;
+        let rows = stmt.query_map(params![program_id], |row| {
+            let ep_cnt: i64 = row.get(3)?;
+            let f_cnt: i64 = row.get(4)?;
+            Ok(ScanRunRecord {
+                id: row.get(0)?,
+                program_id: row.get(1)?,
+                created_at: row.get(2)?,
+                endpoints_count: ep_cnt as usize,
+                findings_count: f_cnt as usize,
+            })
+        })?;
+
+        let mut runs = Vec::new();
+        for r in rows {
+            runs.push(r?);
+        }
+        Ok(runs)
+    }
+
+    /// Computes differential analysis between two specific historical scan runs.
+    pub fn compute_diff_between_runs(
+        &self,
+        program_id: &str,
+        baseline_run_id: i64,
+        current_run_id: i64,
+    ) -> Result<ScanDiff, StorageError> {
+        let conn = self.conn.lock().map_err(|_| StorageError::LockFailure)?;
+
+        // Verify program exists
+        let program_name: String = conn
+            .query_row(
+                "SELECT name FROM programs WHERE id = ?1",
+                params![program_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    StorageError::NotFound(format!("Program '{program_id}' not found"))
+                }
+                other => StorageError::Database(other),
+            })?;
+
+        // Retrieve baseline run
+        let baseline_run: ScanRunRecord = conn
+            .query_row(
+                "SELECT id, program_id, created_at, endpoints_count, findings_count FROM scan_runs WHERE id = ?1 AND program_id = ?2",
+                params![baseline_run_id, program_id],
+                |row| {
+                    let ep_cnt: i64 = row.get(3)?;
+                    let f_cnt: i64 = row.get(4)?;
+                    Ok(ScanRunRecord {
+                        id: row.get(0)?,
+                        program_id: row.get(1)?,
+                        created_at: row.get(2)?,
+                        endpoints_count: ep_cnt as usize,
+                        findings_count: f_cnt as usize,
+                    })
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    StorageError::NotFound(format!("Baseline scan run ID {baseline_run_id} not found"))
+                }
+                other => StorageError::Database(other),
+            })?;
+
+        // Retrieve current run
+        let current_run: ScanRunRecord = conn
+            .query_row(
+                "SELECT id, program_id, created_at, endpoints_count, findings_count FROM scan_runs WHERE id = ?1 AND program_id = ?2",
+                params![current_run_id, program_id],
+                |row| {
+                    let ep_cnt: i64 = row.get(3)?;
+                    let f_cnt: i64 = row.get(4)?;
+                    Ok(ScanRunRecord {
+                        id: row.get(0)?,
+                        program_id: row.get(1)?,
+                        created_at: row.get(2)?,
+                        endpoints_count: ep_cnt as usize,
+                        findings_count: f_cnt as usize,
+                    })
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    StorageError::NotFound(format!("Current scan run ID {current_run_id} not found"))
+                }
+                other => StorageError::Database(other),
+            })?;
+
+        // Query baseline items
+        let mut baseline_stmt = conn.prepare(
+            "SELECT id, scan_run_id, item_type, item_key, status_or_severity, summary FROM scan_snapshot_items WHERE scan_run_id = ?1",
+        )?;
+        let baseline_rows = baseline_stmt.query_map(params![baseline_run_id], |row| {
+            Ok(ScanSnapshotItemRecord {
+                id: row.get(0)?,
+                scan_run_id: row.get(1)?,
+                item_type: row.get(2)?,
+                item_key: row.get(3)?,
+                status_or_severity: row.get(4)?,
+                summary: row.get(5)?,
+            })
+        })?;
+
+        let mut baseline_endpoints: HashMap<String, ScanSnapshotItemRecord> = HashMap::new();
+        let mut baseline_findings: HashMap<String, ScanSnapshotItemRecord> = HashMap::new();
+        for r in baseline_rows {
+            let item = r?;
+            if item.item_type == "endpoint" {
+                baseline_endpoints.insert(item.item_key.clone(), item);
+            } else if item.item_type == "finding" {
+                baseline_findings.insert(item.item_key.clone(), item);
+            }
+        }
+
+        // Query current items
+        let mut current_stmt = conn.prepare(
+            "SELECT id, scan_run_id, item_type, item_key, status_or_severity, summary FROM scan_snapshot_items WHERE scan_run_id = ?1",
+        )?;
+        let current_rows = current_stmt.query_map(params![current_run_id], |row| {
+            Ok(ScanSnapshotItemRecord {
+                id: row.get(0)?,
+                scan_run_id: row.get(1)?,
+                item_type: row.get(2)?,
+                item_key: row.get(3)?,
+                status_or_severity: row.get(4)?,
+                summary: row.get(5)?,
+            })
+        })?;
+
+        let mut current_endpoints: HashMap<String, ScanSnapshotItemRecord> = HashMap::new();
+        let mut current_findings: HashMap<String, ScanSnapshotItemRecord> = HashMap::new();
+        for r in current_rows {
+            let item = r?;
+            if item.item_type == "endpoint" {
+                current_endpoints.insert(item.item_key.clone(), item);
+            } else if item.item_type == "finding" {
+                current_findings.insert(item.item_key.clone(), item);
+            }
+        }
+
+        // Endpoint deltas
+        let mut new_endpoints: Vec<String> = current_endpoints
+            .keys()
+            .filter(|k| !baseline_endpoints.contains_key(*k))
+            .cloned()
+            .collect();
+        new_endpoints.sort();
+
+        let mut removed_endpoints: Vec<String> = baseline_endpoints
+            .keys()
+            .filter(|k| !current_endpoints.contains_key(*k))
+            .cloned()
+            .collect();
+        removed_endpoints.sort();
+
+        let mut status_changes = Vec::new();
+        for (url, cur_item) in &current_endpoints {
+            if let Some(base_item) = baseline_endpoints.get(url) {
+                if base_item.status_or_severity != cur_item.status_or_severity {
+                    status_changes.push(EndpointStatusChange {
+                        url: url.clone(),
+                        baseline_status: base_item.status_or_severity.clone(),
+                        current_status: cur_item.status_or_severity.clone(),
+                    });
+                }
+            }
+        }
+        status_changes.sort_by(|a, b| a.url.cmp(&b.url));
+
+        // Finding deltas
+        let mut new_findings = Vec::new();
+        for (key, cur_item) in &current_findings {
+            if !baseline_findings.contains_key(key) {
+                let (f_type, target_url) = cur_item
+                    .item_key
+                    .split_once("::")
+                    .unwrap_or((&cur_item.item_key, "program"));
+                new_findings.push(DiffFindingItem {
+                    item_key: cur_item.item_key.clone(),
+                    finding_type: f_type.to_string(),
+                    target_url: target_url.to_string(),
+                    severity: cur_item.status_or_severity.clone(),
+                    title: cur_item.summary.clone(),
+                });
+            }
+        }
+        Self::sort_diff_findings(&mut new_findings);
+
+        let mut resolved_findings = Vec::new();
+        for (key, base_item) in &baseline_findings {
+            if !current_findings.contains_key(key) {
+                let (f_type, target_url) = base_item
+                    .item_key
+                    .split_once("::")
+                    .unwrap_or((&base_item.item_key, "program"));
+                resolved_findings.push(DiffFindingItem {
+                    item_key: base_item.item_key.clone(),
+                    finding_type: f_type.to_string(),
+                    target_url: target_url.to_string(),
+                    severity: base_item.status_or_severity.clone(),
+                    title: base_item.summary.clone(),
+                });
+            }
+        }
+        Self::sort_diff_findings(&mut resolved_findings);
+
+        Ok(ScanDiff {
+            program_id: program_id.to_string(),
+            program_name,
+            baseline_run,
+            current_run,
+            new_endpoints,
+            removed_endpoints,
+            status_changes,
+            new_findings,
+            resolved_findings,
+        })
+    }
+
+    fn sort_diff_findings(findings: &mut [DiffFindingItem]) {
+        fn severity_weight(sev: &str) -> u8 {
+            match sev {
+                "CRITICAL" => 1,
+                "HIGH" => 2,
+                "MEDIUM" => 3,
+                "LOW" => 4,
+                "INFO" => 5,
+                _ => 6,
+            }
+        }
+        findings.sort_by(|a, b| {
+            severity_weight(&a.severity)
+                .cmp(&severity_weight(&b.severity))
+                .then_with(|| a.title.cmp(&b.title))
+                .then_with(|| a.item_key.cmp(&b.item_key))
+        });
+    }
+
+    /// Computes differential analysis comparing the two most recent historical scan runs.
+    pub fn compute_latest_diff(&self, program_id: &str) -> Result<ScanDiff, StorageError> {
+        let runs = self.get_scan_runs(program_id)?;
+        if runs.len() < 2 {
+            return Err(StorageError::NotFound(
+                "At least two historical scan runs are required to compute a diff. Run 'bountyscope scan' or 'bountyscope audit' again to generate a second snapshot.".to_string(),
+            ));
+        }
+
+        let current = &runs[0];
+        let baseline = &runs[1];
+        self.compute_diff_between_runs(program_id, baseline.id, current.id)
+    }
 }
 
 #[cfg(test)]
@@ -892,9 +1365,9 @@ mod tests {
     }
 
     #[test]
-    fn test_fresh_db_initializes_schema_version_1() {
+    fn test_fresh_db_initializes_schema_version_2() {
         let storage = StorageEngine::open_in_memory().expect("open_in_memory failed");
-        assert_eq!(storage.schema_version().expect("schema_version failed"), 1);
+        assert_eq!(storage.schema_version().expect("schema_version failed"), 2);
     }
 
     #[test]
@@ -924,9 +1397,9 @@ mod tests {
             .expect("insert legacy row failed");
         }
 
-        // Open with StorageEngine and verify automatic migration
+        // Open with StorageEngine and verify automatic migration to v2
         let storage = StorageEngine::open(&db_path).expect("open StorageEngine failed");
-        assert_eq!(storage.schema_version().expect("schema_version failed"), 1);
+        assert_eq!(storage.schema_version().expect("schema_version failed"), 2);
 
         let prog = storage
             .get_program_by_id("p1")
@@ -959,7 +1432,7 @@ mod tests {
 
         {
             let storage = StorageEngine::open(&db_path).expect("first open failed");
-            assert_eq!(storage.schema_version().expect("schema_version failed"), 1);
+            assert_eq!(storage.schema_version().expect("schema_version failed"), 2);
             let config = sample_config();
             storage
                 .upsert_program_scope(&config)
@@ -968,7 +1441,7 @@ mod tests {
 
         {
             let storage = StorageEngine::open(&db_path).expect("second open failed");
-            assert_eq!(storage.schema_version().expect("schema_version failed"), 1);
+            assert_eq!(storage.schema_version().expect("schema_version failed"), 2);
             let config = sample_config();
             let prog_id = storage
                 .upsert_program_scope(&config)
@@ -978,5 +1451,248 @@ mod tests {
                 .expect("get program failed");
             assert_eq!(prog.name, config.program_name);
         }
+    }
+
+    #[test]
+    fn test_schema_migrates_from_v1_to_v2_cleanly() {
+        let dir = tempfile::tempdir().expect("tempdir failed");
+        let db_path = dir.path().join("v1_to_v2.db");
+
+        // Create a v1 schema database
+        {
+            let conn = Connection::open(&db_path).expect("open connection failed");
+            conn.execute_batch(
+                r#"
+                CREATE TABLE programs (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    platform TEXT NOT NULL,
+                    policy_url TEXT,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE endpoints (
+                    id TEXT PRIMARY KEY,
+                    program_id TEXT NOT NULL REFERENCES programs(id) ON DELETE CASCADE,
+                    url TEXT NOT NULL UNIQUE,
+                    host TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    method TEXT NOT NULL DEFAULT 'GET',
+                    discovered_via TEXT NOT NULL,
+                    status_code INTEGER,
+                    response_size INTEGER,
+                    content_type TEXT,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_verified_at TIMESTAMP
+                );
+
+                PRAGMA user_version = 1;
+                "#,
+            )
+            .expect("init v1 db failed");
+
+            conn.execute(
+                "INSERT INTO programs (id, name, platform, policy_url) VALUES ('p1', 'mig-prog', 'hackerone', 'https://example.com');",
+                [],
+            )
+            .expect("insert program failed");
+
+            conn.execute(
+                "INSERT INTO endpoints (id, program_id, url, host, path, method, discovered_via, status_code) VALUES ('e1', 'p1', 'https://example.com/api', 'example.com', '/api', 'GET', 'seed', 200);",
+                [],
+            )
+            .expect("insert endpoint failed");
+        }
+
+        // Open with StorageEngine and verify automatic migration to v2
+        let storage = StorageEngine::open(&db_path).expect("open StorageEngine failed");
+        assert_eq!(storage.schema_version().expect("schema_version failed"), 2);
+
+        // Verify existing data is preserved
+        let prog = storage
+            .get_program_by_id("p1")
+            .expect("get_program_by_id failed");
+        assert_eq!(prog.name, "mig-prog");
+        let endpoints = storage
+            .get_endpoints_for_program("p1")
+            .expect("get_endpoints failed");
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].url, "https://example.com/api");
+
+        // Verify scan snapshots can now be recorded on the migrated database
+        let run_id = storage
+            .record_scan_snapshot("p1")
+            .expect("record_scan_snapshot failed");
+        assert_eq!(run_id, 1);
+        let runs = storage.get_scan_runs("p1").expect("get_scan_runs failed");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].endpoints_count, 1);
+        assert_eq!(runs[0].findings_count, 0);
+    }
+
+    #[test]
+    fn test_scan_snapshot_and_diff_detects_new_endpoints_status_shifts_and_regressions() {
+        let storage = StorageEngine::open_in_memory().expect("open_in_memory failed");
+        let config = sample_config();
+        let program_id = storage
+            .upsert_program_scope(&config)
+            .expect("upsert_program_scope failed");
+
+        // Baseline: Add endpoint 1 (HTTP 403) and endpoint 2 (HTTP 200)
+        let ep1 = EndpointEntry {
+            program_id: program_id.clone(),
+            url: "https://example.com/api/v1/auth".to_string(),
+            host: "example.com".to_string(),
+            path: "/api/v1/auth".to_string(),
+            method: "GET".to_string(),
+            discovered_via: "seed".to_string(),
+            status_code: Some(403),
+            response_size: Some(100),
+            content_type: Some("application/json".to_string()),
+        };
+        let ep1_id = storage.upsert_endpoint(&ep1).expect("upsert ep1 failed");
+
+        let ep2 = EndpointEntry {
+            program_id: program_id.clone(),
+            url: "https://example.com/api/v1/legacy".to_string(),
+            host: "example.com".to_string(),
+            path: "/api/v1/legacy".to_string(),
+            method: "GET".to_string(),
+            discovered_via: "seed".to_string(),
+            status_code: Some(200),
+            response_size: Some(500),
+            content_type: Some("application/json".to_string()),
+        };
+        let ep2_id = storage.upsert_endpoint(&ep2).expect("upsert ep2 failed");
+
+        // Add finding 1 (HIGH) on ep1 and finding 2 (LOW) on ep2
+        let f1 = FindingEntry {
+            program_id: program_id.clone(),
+            endpoint_id: Some(ep1_id),
+            finding_type: "cors_misconfiguration".to_string(),
+            severity: "HIGH".to_string(),
+            title: "CORS origin reflection".to_string(),
+            description: "Reflected origin".to_string(),
+            evidence: "{}".to_string(),
+            remediation: None,
+        };
+        storage.upsert_finding(&f1).expect("upsert f1 failed");
+
+        let f2 = FindingEntry {
+            program_id: program_id.clone(),
+            endpoint_id: Some(ep2_id),
+            finding_type: "information_disclosure".to_string(),
+            severity: "LOW".to_string(),
+            title: "Server header disclosure".to_string(),
+            description: "Server header leaked".to_string(),
+            evidence: "{}".to_string(),
+            remediation: None,
+        };
+        storage.upsert_finding(&f2).expect("upsert f2 failed");
+
+        // Record Baseline Snapshot (Run 1)
+        let run1_id = storage
+            .record_scan_snapshot(&program_id)
+            .expect("record run1 failed");
+        assert_eq!(run1_id, 1);
+
+        // Diff with only one run must return NotFound error
+        let diff_err = storage.compute_latest_diff(&program_id);
+        assert!(diff_err.is_err());
+
+        // Alter state for Current Run:
+        // 1. Status shift on ep1: 403 -> 200
+        let mut ep1_updated = ep1.clone();
+        ep1_updated.status_code = Some(200);
+        storage
+            .upsert_endpoint(&ep1_updated)
+            .expect("update ep1 failed");
+
+        // 2. Add new endpoint (ep3)
+        let ep3 = EndpointEntry {
+            program_id: program_id.clone(),
+            url: "https://example.com/api/v1/new_ep".to_string(),
+            host: "example.com".to_string(),
+            path: "/api/v1/new_ep".to_string(),
+            method: "POST".to_string(),
+            discovered_via: "crawler".to_string(),
+            status_code: Some(201),
+            response_size: Some(250),
+            content_type: Some("application/json".to_string()),
+        };
+        let ep3_id = storage.upsert_endpoint(&ep3).expect("upsert ep3 failed");
+
+        // 3. Remove ep2 and resolve f2
+        {
+            let conn = storage.conn.lock().expect("lock failed");
+            conn.execute(
+                "DELETE FROM findings WHERE title = 'Server header disclosure'",
+                [],
+            )
+            .expect("delete f2 failed");
+            conn.execute(
+                "DELETE FROM endpoints WHERE url = 'https://example.com/api/v1/legacy'",
+                [],
+            )
+            .expect("delete ep2 failed");
+        }
+
+        // 4. Add new finding (f3 regression) on ep3
+        let f3 = FindingEntry {
+            program_id: program_id.clone(),
+            endpoint_id: Some(ep3_id),
+            finding_type: "open_redirect".to_string(),
+            severity: "MEDIUM".to_string(),
+            title: "Unvalidated parameter redirect".to_string(),
+            description: "Redirects to external domain".to_string(),
+            evidence: "{}".to_string(),
+            remediation: None,
+        };
+        storage.upsert_finding(&f3).expect("upsert f3 failed");
+
+        // Record Current Snapshot (Run 2)
+        let run2_id = storage
+            .record_scan_snapshot(&program_id)
+            .expect("record run2 failed");
+        assert_eq!(run2_id, 2);
+
+        // Compute diff
+        let diff = storage
+            .compute_latest_diff(&program_id)
+            .expect("compute_latest_diff failed");
+
+        assert_eq!(diff.program_id, program_id);
+        assert_eq!(diff.baseline_run.id, 1);
+        assert_eq!(diff.current_run.id, 2);
+
+        // Verify deltas
+        assert_eq!(
+            diff.new_endpoints,
+            vec!["https://example.com/api/v1/new_ep".to_string()]
+        );
+        assert_eq!(
+            diff.removed_endpoints,
+            vec!["https://example.com/api/v1/legacy".to_string()]
+        );
+
+        assert_eq!(diff.status_changes.len(), 1);
+        assert_eq!(
+            diff.status_changes[0].url,
+            "https://example.com/api/v1/auth"
+        );
+        assert_eq!(diff.status_changes[0].baseline_status, "403");
+        assert_eq!(diff.status_changes[0].current_status, "200");
+
+        assert_eq!(diff.new_findings.len(), 1);
+        assert_eq!(diff.new_findings[0].finding_type, "open_redirect");
+        assert_eq!(diff.new_findings[0].severity, "MEDIUM");
+
+        assert_eq!(diff.resolved_findings.len(), 1);
+        assert_eq!(
+            diff.resolved_findings[0].finding_type,
+            "information_disclosure"
+        );
+        assert_eq!(diff.resolved_findings[0].severity, "LOW");
     }
 }
