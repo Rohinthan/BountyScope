@@ -3,7 +3,7 @@
 [![Version](https://img.shields.io/badge/version-0.16.0-blue.svg)](Cargo.toml)
 [![CI](https://github.com/Rohinthan/BountyScope/actions/workflows/ci.yml/badge.svg)](https://github.com/Rohinthan/BountyScope/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
-[![M8ven Score](https://m8ven.ai/badge/mcp/rohinthan/bountyscope)](https://m8ven.ai/mcp/rohinthan/bountyscope?s=readme)
+[![M8ven Score](https://m8ven.ai/badge/mcp/rohinthan-bountyscope-ewsupe?v=829cb44fcc4e4b3979377337d6e8e3d5)](https://m8ven.ai/mcp/rohinthan-bountyscope-ewsupe?s=readme)
 
 BountyScope is a scope-locked reconnaissance, passive policy auditing, and Model Context Protocol (MCP) triage command-line interface written in Rust. It is engineered for authorized bug bounty programs, defensive security reviews, and vulnerability disclosure assessments. The system guarantees strict scope boundaries, non-destructive policy evaluation, deterministic rate limiting, and compile-time target verification before executing any network interactions.
 
