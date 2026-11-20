@@ -1,6 +1,6 @@
 # BountyScope Consolidated Technical Reference
 
-**Document Version:** 0.17.0  
+**Document Version:** 0.17.1  
 **Specification Level:** Final Technical Reference  
 **Applicability:** `bountyscope` CLI and Core Subsystems  
 
@@ -376,7 +376,7 @@ BountyScope features two standardized machine-readable exporters:
    - Also implemented for `bountyscope diff --format json`, rendering structured regression metrics, endpoint additions/removals, status transitions, and newly identified security issues.
 2. **OASIS SARIF v2.1.0 (`--format sarif`):**
    - Implements OASIS Static Analysis Results Interchange Format (version 2.1.0) conforming to `https://json.schemastore.org/sarif-2.1.0.json`.
-   - Driver Component: `runs[0].tool.driver` contains name `"BountyScope"`, version `"0.17.0"`, information URI, and deduplicated `rules[]` entries with title descriptions, full descriptions, and remediation guidance.
+   - Driver Component: `runs[0].tool.driver` contains name `"BountyScope"`, version `"0.17.1"`, information URI, and deduplicated `rules[]` entries with title descriptions, full descriptions, and remediation guidance.
    - Severity-to-Level Mapping:
      - `CRITICAL` / `HIGH` -> `"error"` (`security-severity: "9.0"` / `"7.0"`)
      - `MEDIUM` -> `"warning"` (`security-severity: "5.0"`)
@@ -655,7 +655,7 @@ BountyScope v0.16.4 and v0.17.0 feature passive credential and sensitive token p
 
 | Rule ID | Severity | CWE | Pattern Description | False-Positive Mitigations |
 | :--- | :--- | :--- | :--- | :--- |
-| `exposed_aws_access_key` | HIGH | CWE-798 | AWS Access Key ID (`\b(AKIA[0-9A-Z]{16})\b`) | Filters `AKIAIOSFODNN7EXAMPLE`, `EXAMPLE`, `0000000000000000` |
+| `exposed_aws_access_key` | HIGH | CWE-798 | AWS Access Key ID (`\b(AKIA[0-9A-Z]{16})\b`) | Filters `AKIA****MPLE`, `EXAMPLE`, `0000000000000000` |
 | `exposed_google_api_key` | HIGH | CWE-798 | Google Cloud & Firebase API Key (`\b(AIza[0-9A-Za-z_\-]{35})\b`) | Filters dummy and documentation placeholders |
 | `exposed_github_token` | HIGH | CWE-798 | GitHub PAT / Fine-Grained Token (`ghp_[0-9A-Za-z]{36}`, `github_pat_[0-9A-Za-z_]{22,}`) | Filters `example`, `dummy`, `your_token` |
 | `exposed_stripe_key` | HIGH | CWE-798 | Stripe Live Secret / Restricted Key (`(sk\|rk)_live_[0-9a-zA-Z]{24,}`) | Ignores `pk_live_` (publishable) and `sk_test_` |

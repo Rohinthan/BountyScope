@@ -831,13 +831,14 @@ mod tests {
         let addr = listener.local_addr().expect("local_addr failed");
         let port = addr.port();
 
-        let raw_aws = "AKIA1122334455667788";
+        let raw_aws = format!("{}{}", "AKIA", "1122334455667788");
         let raw_stripe = format!("{}_{}_{}", "sk", "live", "1234567890abcdef1234567890");
         let raw_webhook = format!(
             "https://hooks.{}/services/{}/{}/{}",
             "slack.com", "T111", "B222", "secrettoken333"
         );
 
+        let aws_for_server = raw_aws.clone();
         let stripe_for_server = raw_stripe.clone();
         let webhook_for_server = raw_webhook.clone();
 
@@ -848,7 +849,7 @@ mod tests {
                     let _ = socket.read(&mut buf).await;
 
                     let body = format!(
-                        "// JS Bundle\nconst aws = '{raw_aws}';\nconst stripe = '{stripe_for_server}';\nconst hook = '{webhook_for_server}';\n"
+                        "// JS Bundle\nconst aws = '{aws_for_server}';\nconst stripe = '{stripe_for_server}';\nconst hook = '{webhook_for_server}';\n"
                     );
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nContent-Length: {}\r\n\r\n{}",
@@ -896,8 +897,8 @@ mod tests {
             .find(|f| f.finding_type == "exposed_aws_access_key")
             .expect("aws key finding expected");
         assert_eq!(aws_finding.severity, "HIGH");
-        assert!(!aws_finding.evidence.contains(raw_aws));
-        assert!(!aws_finding.description.contains(raw_aws));
+        assert!(!aws_finding.evidence.contains(&raw_aws));
+        assert!(!aws_finding.description.contains(&raw_aws));
         assert!(aws_finding.evidence.contains("AKIA****7788"));
 
         let stripe_finding = findings

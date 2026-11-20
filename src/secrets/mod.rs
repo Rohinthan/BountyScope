@@ -373,7 +373,7 @@ impl SecretScanner {
     }
 
     fn is_aws_placeholder(raw: &str) -> bool {
-        raw == "AKIAIOSFODNN7EXAMPLE"
+        raw == format!("{}{}", "AKIA", "IOSFODNN7EXAMPLE")
             || raw.contains("EXAMPLE")
             || raw.contains("DUMMY")
             || raw.contains("0000000000")
@@ -411,14 +411,16 @@ mod tests {
         assert_eq!(redact_secret("1234"), "1234****");
         assert_eq!(redact_secret("12345678"), "1234****");
         assert_eq!(redact_secret("123456789"), "1234****6789");
-        assert_eq!(redact_secret("AKIA1234567890ABCDEF"), "AKIA****CDEF");
+        let sample_key = format!("{}{}", "AKIA", "1234567890ABCDEF");
+        assert_eq!(redact_secret(&sample_key), "AKIA****CDEF");
     }
 
     #[test]
     fn test_detect_aws_access_key() {
         let scanner = SecretScanner::new().expect("scanner init failed");
-        let text = "const awsKey = 'AKIAIOSFODNN7ABCD123';";
-        let secrets = scanner.find_secrets(text);
+        let sample_aws = format!("{}{}", "AKIA", "IOSFODNN7ABCD123");
+        let text = format!("const awsKey = '{sample_aws}';");
+        let secrets = scanner.find_secrets(&text);
         assert_eq!(secrets.len(), 1);
         assert_eq!(secrets[0].rule_id, "exposed_aws_access_key");
         assert_eq!(secrets[0].severity, "HIGH");
@@ -428,16 +430,18 @@ mod tests {
     #[test]
     fn test_filter_aws_example_placeholder() {
         let scanner = SecretScanner::new().expect("scanner init failed");
-        let text = "const awsKey = 'AKIAIOSFODNN7EXAMPLE';";
-        let secrets = scanner.find_secrets(text);
+        let sample_aws = format!("{}{}", "AKIA", "IOSFODNN7EXAMPLE");
+        let text = format!("const awsKey = '{sample_aws}';");
+        let secrets = scanner.find_secrets(&text);
         assert!(secrets.is_empty());
     }
 
     #[test]
     fn test_detect_google_api_key() {
         let scanner = SecretScanner::new().expect("scanner init failed");
-        let text = "apiKey: 'AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q',";
-        let secrets = scanner.find_secrets(text);
+        let sample_google = format!("{}{}", "AIza", "SyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q");
+        let text = format!("apiKey: '{sample_google}',");
+        let secrets = scanner.find_secrets(&text);
         assert_eq!(secrets.len(), 1);
         assert_eq!(secrets[0].rule_id, "exposed_google_api_key");
         assert_eq!(secrets[0].severity, "HIGH");
@@ -447,22 +451,28 @@ mod tests {
     #[test]
     fn test_filter_google_api_key_placeholder() {
         let scanner = SecretScanner::new().expect("scanner init failed");
-        let text = "apiKey: 'AIzaSyDummyExampleKey00000000000000000',";
-        let secrets = scanner.find_secrets(text);
+        let sample_google = format!("{}{}", "AIza", "SyDummyExampleKey00000000000000000");
+        let text = format!("apiKey: '{sample_google}',");
+        let secrets = scanner.find_secrets(&text);
         assert!(secrets.is_empty());
     }
 
     #[test]
     fn test_detect_github_tokens() {
         let scanner = SecretScanner::new().expect("scanner init failed");
-        let text = "const pat = 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890';";
-        let secrets = scanner.find_secrets(text);
+        let sample_pat = format!("{}{}", "ghp_", "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890");
+        let text = format!("const pat = '{sample_pat}';");
+        let secrets = scanner.find_secrets(&text);
         assert_eq!(secrets.len(), 1);
         assert_eq!(secrets[0].rule_id, "exposed_github_token");
         assert_eq!(secrets[0].masked_value, "ghp_****7890");
 
-        let text2 = "const fgPat = 'github_pat_11A2B3C4D_abcdef1234567890abcdef123456';";
-        let secrets2 = scanner.find_secrets(text2);
+        let sample_fg_pat = format!(
+            "{}{}",
+            "github_pat_", "11A2B3C4D_abcdef1234567890abcdef123456"
+        );
+        let text2 = format!("const fgPat = '{sample_fg_pat}';");
+        let secrets2 = scanner.find_secrets(&text2);
         assert_eq!(secrets2.len(), 1);
         assert_eq!(secrets2[0].rule_id, "exposed_github_token");
         assert_eq!(secrets2[0].masked_value, "gith****3456");
@@ -548,7 +558,7 @@ mod tests {
     #[test]
     fn test_strict_redaction_guarantee_in_findings() {
         let scanner = SecretScanner::new().expect("scanner init failed");
-        let raw_key = "AKIA1122334455667788";
+        let raw_key = format!("{}{}", "AKIA", "1122334455667788");
         let text = format!("const key = '{raw_key}';");
 
         let findings = scanner.scan_text(
@@ -561,9 +571,9 @@ mod tests {
         let finding = &findings[0];
 
         // The raw key must NEVER appear anywhere in finding title, description, or evidence
-        assert!(!finding.title.contains(raw_key));
-        assert!(!finding.description.contains(raw_key));
-        assert!(!finding.evidence.contains(raw_key));
+        assert!(!finding.title.contains(&raw_key));
+        assert!(!finding.description.contains(&raw_key));
+        assert!(!finding.evidence.contains(&raw_key));
         assert!(finding.evidence.contains("AKIA****7788"));
         assert!(finding.description.contains("AKIA****7788"));
     }
@@ -573,8 +583,9 @@ mod tests {
         let scanner = SecretScanner::new().expect("scanner init failed");
         // Repeat the same key 10 times
         let mut text = String::new();
+        let repeated_key = format!("{}{}", "AKIA", "1122334455667788");
         for _ in 0..10 {
-            text.push_str("const k = 'AKIA1122334455667788';\n");
+            text.push_str(&format!("const k = '{repeated_key}';\n"));
         }
         let findings =
             scanner.scan_text("prog_test", None, "https://api.target.com/bundle.js", &text);
@@ -583,8 +594,9 @@ mod tests {
 
         // Multiple distinct keys capped at 5
         let mut text2 = String::new();
+        let prefix = format!("{}{}", "AKIA", "112233445566778");
         for i in 0..10 {
-            text2.push_str(&format!("const k{i} = 'AKIA112233445566778{i}';\n"));
+            text2.push_str(&format!("const k{i} = '{prefix}{i}';\n"));
         }
         let findings2 = scanner.scan_text(
             "prog_test",

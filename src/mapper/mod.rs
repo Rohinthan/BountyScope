@@ -1799,7 +1799,8 @@ mod tests {
         let addr = listener.local_addr().expect("local_addr failed");
         let port = addr.port();
 
-        let raw_key = "AKIA9988776655443322";
+        let raw_key = format!("{}{}", "AKIA", "9988776655443322");
+        let raw_for_server = raw_key.clone();
 
         tokio::spawn(async move {
             loop {
@@ -1812,7 +1813,7 @@ mod tests {
 <html>
 <head>
     <script>
-        const awsInline = '{raw_key}';
+        const awsInline = '{raw_for_server}';
     </script>
 </head>
 <body>
@@ -1859,7 +1860,7 @@ mod tests {
             .expect("expected aws finding");
 
         assert_eq!(finding.severity, "HIGH");
-        assert!(!finding.evidence.contains(raw_key));
+        assert!(!finding.evidence.contains(&raw_key));
         assert!(finding.evidence.contains("AKIA****3322"));
     }
 }

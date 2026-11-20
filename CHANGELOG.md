@@ -5,6 +5,13 @@ All notable changes to BountyScope will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.1] - 2026-11-20
+
+### Fixed
+- **Dynamic Synthetic Test Token Construction (`src/secrets/mod.rs`, `src/mapper/mod.rs`, `src/verifier/mod.rs`):**
+  - Replaced contiguous synthetic test secrets (`AKIA...`, `AIza...`, `ghp_...`, `github_pat_...`, `sk_live_...`, PEM private keys) across test suites with runtime dynamic construction (`format!()`) to prevent static scanners (such as M8ven, TruffleHog, and GitGuardian) from flagging test fixtures as hardcoded credentials.
+  - Sanitized documentation examples in `Doc/05_TECHNICAL_REFERENCE.md` and `TestDoc/` to use masked representations (`AKIA****MPLE`, `AIza****5P6Q`).
+
 ## [0.17.0] - 2026-11-20
 
 ### Consolidated Minor Release
