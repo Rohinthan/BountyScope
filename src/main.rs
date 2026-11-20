@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "bountyscope")]
-#[command(version = "0.16.3")]
+#[command(version = "0.16.4")]
 #[command(
     about = "Automated vulnerability surface mapping and passive policy verification engine",
     long_about = "BountyScope is an automated vulnerability surface mapping and passive policy verification engine designed for authorized security assessments and bug bounty programs."
@@ -290,7 +290,7 @@ async fn main() -> Result<()> {
         }) => execute_diff(&config, &db, from, to, &output, stdout, format).await,
         Some(Commands::Mcp { config, db }) => execute_mcp(&config, &db).await,
         None => {
-            println!("BountyScope v0.16.3 - Vulnerability Surface Mapping Engine");
+            println!("BountyScope v0.16.4 - Vulnerability Surface Mapping Engine");
             println!("Run 'bountyscope --help' for available commands.");
             Ok(())
         }
@@ -555,7 +555,8 @@ async fn execute_scan(
     );
 
     println!("Starting non-destructive security verification...");
-    let runner = SafeVerificationRunner::new(&enforcer, &client, &storage, program_id.clone());
+    let runner = SafeVerificationRunner::new(&enforcer, &client, &storage, program_id.clone())
+        .with_context(|| "Failed to initialize verification runner")?;
     let audit_summary = runner
         .run()
         .await
@@ -766,7 +767,8 @@ async fn execute_audit(config_path: &PathBuf, db_arg: &Option<PathBuf>) -> Resul
         .with_context(|| "Failed to initialize scoped HTTP client")?
         .with_researcher_handle(config.researcher_handle.clone());
 
-    let runner = SafeVerificationRunner::new(&enforcer, &client, &storage, program.id.clone());
+    let runner = SafeVerificationRunner::new(&enforcer, &client, &storage, program.id.clone())
+        .with_context(|| "Failed to initialize verification runner")?;
     let summary = runner
         .run()
         .await

@@ -147,7 +147,8 @@ async fn test_offline_verification_runner_and_report_generation() {
         .expect("upsert ep_dashboard failed");
 
     // Execute verification runner
-    let runner = SafeVerificationRunner::new(&enforcer, &client, &storage, program_id.clone());
+    let runner = SafeVerificationRunner::new(&enforcer, &client, &storage, program_id.clone())
+        .expect("init runner failed");
     let summary = runner.run().await.expect("runner execution failed");
 
     assert_eq!(summary.total_audited, 5);

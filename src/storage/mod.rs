@@ -623,6 +623,48 @@ impl StorageEngine {
         Ok(endpoints)
     }
 
+    /// Queries an endpoint record by program ID and URL.
+    pub fn get_endpoint_by_url(
+        &self,
+        program_id: &str,
+        url: &str,
+    ) -> Result<Option<EndpointRecord>, StorageError> {
+        let conn = self.conn.lock().map_err(|_| StorageError::LockFailure)?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, program_id, url, host, path, method, discovered_via,
+                   status_code, response_size, content_type, created_at, last_verified_at
+            FROM endpoints
+            WHERE program_id = ?1 AND url = ?2
+            LIMIT 1
+            "#,
+        )?;
+        let mut rows = stmt.query_map(params![program_id, url], |row| {
+            let status: Option<i32> = row.get(7)?;
+            let size: Option<i64> = row.get(8)?;
+            Ok(EndpointRecord {
+                id: row.get(0)?,
+                program_id: row.get(1)?,
+                url: row.get(2)?,
+                host: row.get(3)?,
+                path: row.get(4)?,
+                method: row.get(5)?,
+                discovered_via: row.get(6)?,
+                status_code: status.map(|s| s as u16),
+                response_size: size.map(|s| s as usize),
+                content_type: row.get(9)?,
+                created_at: row.get(10)?,
+                last_verified_at: row.get(11)?,
+            })
+        })?;
+
+        if let Some(first) = rows.next() {
+            Ok(Some(first?))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Retrieves a target program record by its unique ID.
     pub fn get_program_by_id(&self, program_id: &str) -> Result<ProgramRecord, StorageError> {
         let conn = self.conn.lock().map_err(|_| StorageError::LockFailure)?;

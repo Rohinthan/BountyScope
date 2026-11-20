@@ -6,6 +6,7 @@ pub mod mapper;
 pub mod mcp;
 pub mod report;
 pub mod scope;
+pub mod secrets;
 pub mod storage;
 pub mod verifier;
 
@@ -19,6 +20,7 @@ pub use mapper::{DiscoveredEndpoint, SurfaceMapResult, SurfaceMapper};
 pub use mcp::{BountyScopeMcpServer, ValidateScopeRequest, ValidateScopeResponse};
 pub use report::{ReportFormat, ReportGenerator};
 pub use scope::{normalize_path, ScopeConfig, ScopeEnforcer, ScopeLintReport, VerifiedScopeUrl};
+pub use secrets::{redact_secret, DetectedSecret, SecretScanner, SecretType};
 pub use storage::{
     AuditLogEntry, AuditLogRecord, DiffFindingItem, DiffSubdomainItem, DiffTechItem,
     DiscoveredSubdomainRecord, EndpointEntry, EndpointRecord, EndpointStatusChange, FindingEntry,

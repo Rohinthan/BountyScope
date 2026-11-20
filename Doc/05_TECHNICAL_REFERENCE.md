@@ -1,6 +1,6 @@
 # BountyScope Consolidated Technical Reference
 
-**Document Version:** 0.16.3  
+**Document Version:** 0.16.4  
 **Specification Level:** Final Technical Reference  
 **Applicability:** `bountyscope` CLI and Core Subsystems  
 
@@ -376,7 +376,7 @@ BountyScope features two standardized machine-readable exporters:
    - Also implemented for `bountyscope diff --format json`, rendering structured regression metrics, endpoint additions/removals, status transitions, and newly identified security issues.
 2. **OASIS SARIF v2.1.0 (`--format sarif`):**
    - Implements OASIS Static Analysis Results Interchange Format (version 2.1.0) conforming to `https://json.schemastore.org/sarif-2.1.0.json`.
-   - Driver Component: `runs[0].tool.driver` contains name `"BountyScope"`, version `"0.16.3"`, information URI, and deduplicated `rules[]` entries with title descriptions, full descriptions, and remediation guidance.
+   - Driver Component: `runs[0].tool.driver` contains name `"BountyScope"`, version `"0.16.4"`, information URI, and deduplicated `rules[]` entries with title descriptions, full descriptions, and remediation guidance.
    - Severity-to-Level Mapping:
      - `CRITICAL` / `HIGH` -> `"error"` (`security-severity: "9.0"` / `"7.0"`)
      - `MEDIUM` -> `"warning"` (`security-severity: "5.0"`)
@@ -644,6 +644,49 @@ Public Certificate Transparency logs (specifically `crt.sh`) frequently encounte
 - **Snapshot Persistence & Diff:** Discovered subdomains are stored in SQLite (`endpoints` table and `scan_snapshot_items` with `item_type = 'subdomain'`). Differential analysis detects `new_subdomains` and `removed_subdomains` across historical scan runs.
 - **Reports:** Markdown assessment reports include `## Discovered Subdomains`; diff reports display `## Subdomains & Hostname Changes`. JSON reports and diffs output `subdomains`, `new_subdomains`, and `removed_subdomains`.
 - **MCP Tool:** `list_discovered_subdomains` tool enables external agents to query in-scope subdomains with optional `source` filtering, complete with standard `ToolAnnotations` hints (`read_only_hint: true`, `destructive_hint: false`, `idempotent_hint: true`, `open_world_hint: false`).
+
+---
+
+## 14. Passive JS & Source Map Secret / Token Pattern Detection (v0.16.4)
+
+BountyScope v0.16.4 adds passive credential and sensitive token pattern detection (`SecretScanner` in `src/secrets/mod.rs`). The engine analyzes client-accessible assets already retrieved during surface mapping (inline scripts, external `.js` scripts, `.js.map` source maps) and verification runner audits with zero additional network requests.
+
+### 14.1 Detection Rules & Pattern Matrix
+
+| Rule ID | Severity | CWE | Pattern Description | False-Positive Mitigations |
+| :--- | :--- | :--- | :--- | :--- |
+| `exposed_aws_access_key` | HIGH | CWE-798 | AWS Access Key ID (`\b(AKIA[0-9A-Z]{16})\b`) | Filters `AKIAIOSFODNN7EXAMPLE`, `EXAMPLE`, `0000000000000000` |
+| `exposed_google_api_key` | HIGH | CWE-798 | Google Cloud & Firebase API Key (`\b(AIza[0-9A-Za-z_\-]{35})\b`) | Filters dummy and documentation placeholders |
+| `exposed_github_token` | HIGH | CWE-798 | GitHub PAT / Fine-Grained Token (`ghp_[0-9A-Za-z]{36}`, `github_pat_[0-9A-Za-z_]{22,}`) | Filters `example`, `dummy`, `your_token` |
+| `exposed_stripe_key` | HIGH | CWE-798 | Stripe Live Secret / Restricted Key (`(sk\|rk)_live_[0-9a-zA-Z]{24,}`) | Ignores `pk_live_` (publishable) and `sk_test_` |
+| `exposed_webhook_url` | HIGH | CWE-798 | Slack (`hooks.slack.com/services/...`) & Discord (`discord.com/api/webhooks/...`) | Filters dummy/example tokens |
+| `exposed_private_key` | HIGH | CWE-312 | Private Key PEM Headers (`-----BEGIN (?:RSA\|EC\|OPENSSH\|DSA )?PRIVATE KEY-----`) | Filters example and test certificates |
+| `exposed_bearer_jwt` | HIGH | CWE-798 | Hardcoded JWT or Bearer Assignment (`eyJ...`) | Filters example claims and non-credential tokens |
+| `exposed_internal_host` | MEDIUM | CWE-200 | Internal TLDs (`.internal`, `.corp`, `.local`, `.staging`, `.test`) & RFC 1918 IPs | Filters `example.`, `schema.org`, `w3.org`, `localhost` |
+
+### 14.2 Strict Evidence Redaction Invariant
+
+BountyScope enforces a strict architectural redaction guarantee:
+1. **Redaction Function (`redact_secret`):** For values longer than 8 characters, only the first 4 and last 4 characters are preserved, separated by `****` (e.g., `AKIA****7788`). For shorter strings, at most the first 4 characters are preserved followed by `****`.
+2. **Fail-Safe Storage & Reporting:** The raw, unmasked secret string is **never** placed in `FindingEntry.evidence`, `FindingEntry.description`, or `FindingEntry.title`.
+3. **Database & Downstream Formats:** SQLite records, Markdown tables, JSON exports, SARIF artifacts, and MCP responses receive only the sanitized, redacted form.
+
+### 14.3 Finding Deduplication & Endpoint Capping
+
+Client-side JavaScript bundles frequently repeat identical credentials or invoke minified libraries that match multiple patterns:
+- Findings are deduplicated per endpoint by `(rule_id, masked_secret)`.
+- A maximum threshold of 5 findings per rule per endpoint is enforced to prevent alert fatigue.
+
+### 14.4 Configuration-Level Check Exclusion
+
+Operators can disable secret detection globally or selectively in `scope.yaml`:
+```yaml
+excluded_checks:
+  - "secrets"                 # Excludes all secret detection rules
+  - "exposed_secrets"         # Alternative category alias
+  - "exposed_aws_access_key"  # Excludes only AWS access key detection
+```
+
 
 
 

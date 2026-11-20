@@ -5,6 +5,26 @@ All notable changes to BountyScope will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.4] - 2026-11-20
+
+### Added
+- **Passive JavaScript & Source Map Secret / Token Pattern Detection (`src/secrets/`):**
+  - Implemented `SecretScanner` performing deterministic, zero-network-I/O pattern scanning across response bodies already retrieved during `SurfaceMapper` (inline scripts, external `.js` scripts, `.js.map` source maps) and `SafeVerificationRunner` audits.
+  - Detects high-confidence secrets across 8 distinct categories:
+    - `exposed_aws_access_key` (HIGH): AWS Access Key ID (`AKIA[0-9A-Z]{16}`) with AWS documentation placeholder filtering (`AKIAIOSFODNN7EXAMPLE`).
+    - `exposed_google_api_key` (HIGH): Google Cloud & Firebase API Keys (`AIza[0-9A-Za-z_\-]{35}`).
+    - `exposed_github_token` (HIGH): GitHub Personal Access and Fine-Grained Tokens (`ghp_[0-9A-Za-z]{36}`, `github_pat_[0-9A-Za-z_]{22,}`).
+    - `exposed_stripe_key` (HIGH): Stripe Live Secret and Restricted Keys (`(sk|rk)_live_[0-9a-zA-Z]{24,}`), ignoring publishable keys (`pk_live_`) and test keys (`sk_test_`).
+    - `exposed_webhook_url` (HIGH): Slack and Discord Incoming Webhook URLs.
+    - `exposed_private_key` (HIGH): Private Cryptographic Key PEM headers (`-----BEGIN ... PRIVATE KEY-----`).
+    - `exposed_bearer_jwt` (HIGH): Hardcoded JSON Web Token (JWT) or Bearer authorization credentials (`eyJ...`).
+    - `exposed_internal_host` (MEDIUM): Internal staging infrastructure hostnames (`.internal`, `.corp`, `.local`, `.staging`, `.test`) and RFC 1918 private IP addresses (`10.x.x.x`, `172.16-31.x.x`, `192.168.x.x`).
+  - **Strict Evidence Redaction Guarantee:** Created `redact_secret()` masking secrets to at most 4 prefix and 4 suffix characters (e.g., `AKIA****7788`). The raw, unmasked secret string is guaranteed to never be stored in SQLite `findings` evidence/description, printed to stdout/stderr, or exported in Markdown, JSON, or SARIF reports.
+  - **False-Positive Suppression & Finding Capping:** Automatically suppresses documentation placeholders (`EXAMPLE`, `DUMMY`, `YOUR_KEY`, `00000000`) and deduplicates matches by `(rule_id, masked_secret)` with a per-rule ceiling of 5 findings per endpoint.
+  - **Config-Driven Exclusions:** Seamless integration with `excluded_checks`, honoring category rules (`secrets`, `exposed_secrets`) or specific rule names (`exposed_aws_access_key`).
+- **Database & Storage Engine Enhancements (`src/storage/`):**
+  - Added `StorageEngine::get_endpoint_by_url(program_id, url)` for direct endpoint resolution.
+
 ## [0.16.3] - 2026-11-20
 
 ### Added

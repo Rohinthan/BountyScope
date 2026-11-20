@@ -28,6 +28,7 @@ pub struct SafeVerificationRunner<'a> {
     http_client: &'a ScopedHttpClient,
     storage: &'a StorageEngine,
     program_id: String,
+    secret_scanner: crate::secrets::SecretScanner,
 }
 
 impl<'a> SafeVerificationRunner<'a> {
@@ -37,13 +38,15 @@ impl<'a> SafeVerificationRunner<'a> {
         http_client: &'a ScopedHttpClient,
         storage: &'a StorageEngine,
         program_id: String,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, VerifierError> {
+        let secret_scanner = crate::secrets::SecretScanner::new()?;
+        Ok(Self {
             enforcer,
             http_client,
             storage,
             program_id,
-        }
+            secret_scanner,
+        })
     }
 
     /// Checks if a given URI path points to a static media or style asset exempt from CORS checks.
@@ -58,20 +61,22 @@ impl<'a> SafeVerificationRunner<'a> {
 
     /// Evaluates if a given finding type is excluded by program Rules of Engagement.
     pub fn is_check_excluded(&self, finding_type: &str) -> bool {
+        let norm_finding = finding_type.to_ascii_lowercase().replace('-', "_");
         self.enforcer
             .config()
             .excluded_checks
             .iter()
             .any(|excluded| {
-                excluded.eq_ignore_ascii_case(finding_type)
-                    || (finding_type == "header_info_disclosure"
-                        && excluded.eq_ignore_ascii_case("information_disclosure"))
-                    || (finding_type == "information_disclosure"
-                        && excluded.eq_ignore_ascii_case("header_info_disclosure"))
-                    || (finding_type == "weak_csp"
-                        && excluded.eq_ignore_ascii_case("weak_security_headers"))
-                    || (finding_type == "weak_security_headers"
-                        && excluded.eq_ignore_ascii_case("weak_csp"))
+                let norm_excluded = excluded.to_ascii_lowercase().replace('-', "_");
+                norm_finding == norm_excluded
+                    || (norm_excluded == "secrets" && norm_finding.starts_with("exposed_"))
+                    || (norm_excluded == "exposed_secrets" && norm_finding.starts_with("exposed_"))
+                    || (norm_finding == "header_info_disclosure"
+                        && norm_excluded == "information_disclosure")
+                    || (norm_finding == "information_disclosure"
+                        && norm_excluded == "header_info_disclosure")
+                    || (norm_finding == "weak_csp" && norm_excluded == "weak_security_headers")
+                    || (norm_finding == "weak_security_headers" && norm_excluded == "weak_csp")
             })
     }
 
@@ -365,6 +370,19 @@ impl<'a> SafeVerificationRunner<'a> {
                         self.record_finding(finding)?;
                     }
                 }
+
+                // Check 5: Passive Secret / Token Pattern Detection
+                if let Ok(body_str) = resp.body_as_str() {
+                    let secrets = self.secret_scanner.scan_text(
+                        &self.program_id,
+                        Some(&endpoint.id),
+                        &endpoint.url,
+                        body_str,
+                    );
+                    for finding in secrets {
+                        self.record_finding(finding)?;
+                    }
+                }
             }
 
             // Check 3: CORS Policy Inspection (with static asset exemption)
@@ -583,7 +601,8 @@ mod tests {
             .upsert_endpoint(&ep_font)
             .expect("upsert font failed");
 
-        let runner = SafeVerificationRunner::new(&enforcer, &client, &storage, program_id.clone());
+        let runner = SafeVerificationRunner::new(&enforcer, &client, &storage, program_id.clone())
+            .expect("init runner failed");
         let summary = runner.run().await.expect("runner execution failed");
 
         assert_eq!(summary.total_audited, 2);
@@ -664,7 +683,8 @@ mod tests {
             .upsert_endpoint(&ep)
             .expect("upsert endpoint failed");
 
-        let runner = SafeVerificationRunner::new(&enforcer, &client, &storage, program_id.clone());
+        let runner = SafeVerificationRunner::new(&enforcer, &client, &storage, program_id.clone())
+            .expect("init runner failed");
         let summary = runner.run().await.expect("runner failed");
 
         let findings = storage
@@ -754,7 +774,8 @@ mod tests {
             .upsert_endpoint(&ep_html)
             .expect("upsert html endpoint failed");
 
-        let runner = SafeVerificationRunner::new(&enforcer, &client, &storage, program_id.clone());
+        let runner = SafeVerificationRunner::new(&enforcer, &client, &storage, program_id.clone())
+            .expect("init runner failed");
         let summary = runner.run().await.expect("runner execution failed");
 
         assert_eq!(summary.total_audited, 2);
@@ -802,5 +823,110 @@ mod tests {
                 && f.finding_type == "missing_security_headers"
                 && f.title.contains("X-Content-Type-Options")
         }));
+    }
+
+    #[tokio::test]
+    async fn test_verifier_passive_secret_detection_and_redaction() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind failed");
+        let addr = listener.local_addr().expect("local_addr failed");
+        let port = addr.port();
+
+        let raw_aws = "AKIA1122334455667788";
+        let raw_stripe = format!("{}_{}_{}", "sk", "live", "1234567890abcdef1234567890");
+        let raw_webhook = format!(
+            "https://hooks.{}/services/{}/{}/{}",
+            "slack.com", "T111", "B222", "secrettoken333"
+        );
+
+        let stripe_for_server = raw_stripe.clone();
+        let webhook_for_server = raw_webhook.clone();
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buf = [0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+
+                    let body = format!(
+                        "// JS Bundle\nconst aws = '{raw_aws}';\nconst stripe = '{stripe_for_server}';\nconst hook = '{webhook_for_server}';\n"
+                    );
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                }
+            }
+        });
+
+        let storage = StorageEngine::open_in_memory().expect("storage open failed");
+        let config = test_scope_config(port);
+        let program_id = storage
+            .upsert_program_scope(&config)
+            .expect("upsert failed");
+        let enforcer = ScopeEnforcer::new(config).expect("enforcer failed");
+        let client =
+            ScopedHttpClient::new(storage.clone(), program_id.clone(), 50).expect("client failed");
+
+        let ep = EndpointEntry {
+            program_id: program_id.clone(),
+            url: format!("http://127.0.0.1:{}/assets/app.js", port),
+            host: "127.0.0.1".to_string(),
+            path: "/assets/app.js".to_string(),
+            method: "GET".to_string(),
+            discovered_via: "html_script".to_string(),
+            status_code: Some(200),
+            response_size: Some(150),
+            content_type: Some("application/javascript".to_string()),
+        };
+        storage.upsert_endpoint(&ep).expect("upsert failed");
+
+        let runner = SafeVerificationRunner::new(&enforcer, &client, &storage, program_id.clone())
+            .expect("init runner failed");
+        let summary = runner.run().await.expect("run failed");
+
+        assert!(summary.findings_count >= 3);
+        let findings = storage
+            .get_findings_for_program(&program_id)
+            .expect("query findings failed");
+
+        let aws_finding = findings
+            .iter()
+            .find(|f| f.finding_type == "exposed_aws_access_key")
+            .expect("aws key finding expected");
+        assert_eq!(aws_finding.severity, "HIGH");
+        assert!(!aws_finding.evidence.contains(raw_aws));
+        assert!(!aws_finding.description.contains(raw_aws));
+        assert!(aws_finding.evidence.contains("AKIA****7788"));
+
+        let stripe_finding = findings
+            .iter()
+            .find(|f| f.finding_type == "exposed_stripe_key")
+            .expect("stripe key finding expected");
+        assert_eq!(stripe_finding.severity, "HIGH");
+        assert!(!stripe_finding.evidence.contains(&raw_stripe));
+        assert!(!stripe_finding.description.contains(&raw_stripe));
+        assert!(stripe_finding.evidence.contains("sk_l****7890"));
+
+        let webhook_finding = findings
+            .iter()
+            .find(|f| f.finding_type == "exposed_webhook_url")
+            .expect("webhook finding expected");
+        assert_eq!(webhook_finding.severity, "HIGH");
+        assert!(!webhook_finding.evidence.contains(&raw_webhook));
+        assert!(!webhook_finding.description.contains(&raw_webhook));
+
+        // Test exclusion mechanism
+        let mut excluded_config = test_scope_config(port);
+        excluded_config.excluded_checks = vec!["exposed_secrets".to_string()];
+        let excluded_enforcer = ScopeEnforcer::new(excluded_config).expect("enforcer failed");
+        let excluded_runner =
+            SafeVerificationRunner::new(&excluded_enforcer, &client, &storage, program_id.clone())
+                .expect("init runner failed");
+
+        assert!(excluded_runner.is_check_excluded("exposed_aws_access_key"));
+        assert!(excluded_runner.is_check_excluded("exposed_stripe_key"));
+        assert!(excluded_runner.is_check_excluded("exposed_webhook_url"));
     }
 }

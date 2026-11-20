@@ -53,6 +53,7 @@ pub struct SurfaceMapper<'a> {
     source_map_regex: Regex,
     sitemap_loc_regex: Regex,
     sec_url_regex: Regex,
+    secret_scanner: crate::secrets::SecretScanner,
 }
 
 impl<'a> SurfaceMapper<'a> {
@@ -70,6 +71,7 @@ impl<'a> SurfaceMapper<'a> {
         let source_map_regex = Regex::new(r#"(?m)(?://|/\*)[#@]\s*sourceMappingURL=([^\s\*]+)"#)?;
         let sitemap_loc_regex = Regex::new(r#"(?i)<loc>\s*([^<\s]+)\s*</loc>"#)?;
         let sec_url_regex = Regex::new(r#"https?://[^\s"'`<>]+"#)?;
+        let secret_scanner = crate::secrets::SecretScanner::new()?;
 
         Ok(Self {
             enforcer,
@@ -82,6 +84,7 @@ impl<'a> SurfaceMapper<'a> {
             source_map_regex,
             sitemap_loc_regex,
             sec_url_regex,
+            secret_scanner,
         })
     }
 
@@ -89,6 +92,21 @@ impl<'a> SurfaceMapper<'a> {
     pub fn with_ct_discovery(mut self, enable_ct: bool) -> Self {
         self.enable_ct = enable_ct;
         self
+    }
+
+    /// Evaluates if a finding type is excluded by configured policy rules.
+    pub fn is_check_excluded(&self, finding_type: &str) -> bool {
+        let norm_finding = finding_type.to_ascii_lowercase().replace('-', "_");
+        self.enforcer
+            .config()
+            .excluded_checks
+            .iter()
+            .any(|excluded| {
+                let norm_excluded = excluded.to_ascii_lowercase().replace('-', "_");
+                norm_finding == norm_excluded
+                    || (norm_excluded == "secrets" && norm_finding.starts_with("exposed_"))
+                    || (norm_excluded == "exposed_secrets" && norm_finding.starts_with("exposed_"))
+            })
     }
 
     /// Performs passive surface mapping starting from a seed URL within authorized scope.
@@ -380,6 +398,16 @@ impl<'a> SurfaceMapper<'a> {
             out_of_scope_discarded,
         );
 
+        // Passively scan HTML content for exposed secrets or credentials
+        let html_secrets =
+            self.secret_scanner
+                .scan_text(&self.program_id, None, seed.as_str(), html_str);
+        for finding in html_secrets {
+            if !self.is_check_excluded(&finding.finding_type) {
+                let _ = self.storage.upsert_finding(&finding);
+            }
+        }
+
         // Extract routes and subdomains from inline <script> tags
         let inline_script_selector = Selector::parse("script:not([src])")
             .map_err(|e| MapperError::Selector(format!("{e:?}")))?;
@@ -456,6 +484,18 @@ impl<'a> SurfaceMapper<'a> {
                             out_of_scope_discarded,
                         )
                         .await?;
+
+                        let script_secrets = self.secret_scanner.scan_text(
+                            &self.program_id,
+                            None,
+                            script_verified.as_str(),
+                            js_content,
+                        );
+                        for finding in script_secrets {
+                            if !self.is_check_excluded(&finding.finding_type) {
+                                let _ = self.storage.upsert_finding(&finding);
+                            }
+                        }
                     }
                 }
                 Err(_) => {
@@ -679,6 +719,19 @@ impl<'a> SurfaceMapper<'a> {
                                 discovered_map,
                                 out_of_scope_discarded,
                             );
+
+                            // 4. Passively scan source map for exposed secrets or credentials
+                            let map_secrets = self.secret_scanner.scan_text(
+                                &self.program_id,
+                                None,
+                                verified_map.as_str(),
+                                body_str,
+                            );
+                            for finding in map_secrets {
+                                if !self.is_check_excluded(&finding.finding_type) {
+                                    let _ = self.storage.upsert_finding(&finding);
+                                }
+                            }
                         }
                     }
                 }
@@ -1738,5 +1791,75 @@ mod tests {
             .any(|e| e.host == "unauthorized.external.com"));
 
         assert!(result.out_of_scope_discarded >= 2);
+    }
+
+    #[tokio::test]
+    async fn test_mapper_passive_secret_detection_in_scripts_and_source_maps() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind failed");
+        let addr = listener.local_addr().expect("local_addr failed");
+        let port = addr.port();
+
+        let raw_key = "AKIA9988776655443322";
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buf = [0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+
+                    let html = format!(
+                        r#"<!DOCTYPE html>
+<html>
+<head>
+    <script>
+        const awsInline = '{raw_key}';
+    </script>
+</head>
+<body>
+    <a href="/about">About</a>
+</body>
+</html>"#
+                    );
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
+                        html.len(),
+                        html
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                }
+            }
+        });
+
+        let storage = StorageEngine::open_in_memory().expect("storage open failed");
+        let config = test_scope_config(port);
+        let program_id = storage
+            .upsert_program_scope(&config)
+            .expect("upsert failed");
+        let enforcer = ScopeEnforcer::new(config).expect("enforcer failed");
+        let client =
+            ScopedHttpClient::new(storage.clone(), program_id.clone(), 50).expect("client failed");
+
+        let seed_url_str = format!("http://127.0.0.1:{}/", port);
+        let seed = enforcer
+            .validate_url(&seed_url_str)
+            .expect("seed validation failed");
+
+        let mapper = SurfaceMapper::new(&enforcer, &client, &storage, program_id.clone())
+            .expect("mapper creation failed");
+
+        let _ = mapper.map(&seed).await.expect("map failed");
+
+        let findings = storage
+            .get_findings_for_program(&program_id)
+            .expect("query findings failed");
+
+        let finding = findings
+            .iter()
+            .find(|f| f.finding_type == "exposed_aws_access_key")
+            .expect("expected aws finding");
+
+        assert_eq!(finding.severity, "HIGH");
+        assert!(!finding.evidence.contains(raw_key));
+        assert!(finding.evidence.contains("AKIA****3322"));
     }
 }

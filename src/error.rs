@@ -114,6 +114,9 @@ pub enum VerifierError {
 
     #[error("JSON serialization error during verification: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("Regex compilation error during verification: {0}")]
+    Regex(#[from] regex::Error),
 }
 
 /// Structured errors for report generation operations.

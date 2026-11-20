@@ -1,6 +1,6 @@
 # BountyScope
 
-[![Version](https://img.shields.io/badge/version-0.16.3-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.16.4-blue.svg)](Cargo.toml)
 [![CI](https://github.com/Rohinthan/BountyScope/actions/workflows/ci.yml/badge.svg)](https://github.com/Rohinthan/BountyScope/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![M8ven Score](https://m8ven.ai/badge/mcp/rohinthan-bountyscope-ewsupe?v=829cb44fcc4e4b3979377337d6e8e3d5)](https://m8ven.ai/mcp/rohinthan-bountyscope-ewsupe?s=readme)
@@ -564,7 +564,23 @@ bountyscope scan --url https://example.com/ --config configs/scope.example.yaml 
 
 Every candidate hostname discovered via CT logs is validated against `ScopeEnforcer::validate_url()`—guaranteeing that out-of-scope or excluded subdomains are dropped immediately.
 
-### 9. Serve Model Context Protocol (MCP)
+### 9. Passive Secret & Token Detection with Strict Evidence Redaction
+
+Inspects JavaScript bundles, source maps, and inline HTML scripts already retrieved during mapping and verification to detect high-confidence credential leaks with zero extra network requests:
+
+- **Supported Token Categories:**
+  - AWS Access Key ID (`AKIA[0-9A-Z]{16}`)
+  - Google Cloud / Firebase API Key (`AIza[0-9A-Za-z_\-]{35}`)
+  - GitHub Personal Access & Fine-Grained Tokens (`ghp_...`, `github_pat_...`)
+  - Stripe Live Secret & Restricted Keys (`sk_live_...`, `rk_live_...`)
+  - Slack & Discord Incoming Webhook URLs
+  - Private Cryptographic Key PEM Headers (`-----BEGIN ... PRIVATE KEY-----`)
+  - Hardcoded Bearer / JWT Literals (`eyJ...`)
+  - Internal Infrastructure Hostnames & RFC 1918 Private IP URLs (`.internal`, `.corp`, `.local`, `10.x.x.x`, `192.168.x.x`)
+- **Strict Evidence Redaction Guarantee:** The raw secret is **never** printed, stored in SQLite database tables, or exported in Markdown, JSON, or SARIF reports. All evidence snippets are masked preserving at most 4 prefix and 4 suffix characters (e.g. `AKIA****7788`).
+- **Policy Exclusion Support:** Operators can exclude all secret checks (`excluded_checks: ["secrets"]` or `["exposed_secrets"]`) or individual rules (e.g., `["exposed_aws_access_key"]`) in `scope.yaml`.
+
+### 10. Serve Model Context Protocol (MCP)
 
 ```bash
 bountyscope mcp --config configs/scope.example.yaml

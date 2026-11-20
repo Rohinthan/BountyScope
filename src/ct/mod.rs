@@ -49,11 +49,11 @@ impl CtLogDiscoverer {
         let ua = match (user_agent, researcher_handle) {
             (Some(ua), _) => ua.to_string(),
             (None, Some(h)) => format!(
-                "BountyScope/0.16.3 (Security Assessment Engine; handle: {}; +https://github.com/Rohinthan/BountyScope)",
+                "BountyScope/0.16.4 (Security Assessment Engine; handle: {}; +https://github.com/Rohinthan/BountyScope)",
                 h
             ),
             (None, None) => {
-                "BountyScope/0.16.3 (Security Assessment Engine; +https://github.com/Rohinthan/BountyScope)".to_string()
+                "BountyScope/0.16.4 (Security Assessment Engine; +https://github.com/Rohinthan/BountyScope)".to_string()
             }
         };
 
