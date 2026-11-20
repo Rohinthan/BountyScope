@@ -16,6 +16,9 @@ async fn test_end_to_end_mcp_session_over_duplex_stream() {
         excluded_paths: vec!["/logout".to_string()],
         rate_limit_rps: 10,
         safe_mode: true,
+        allow_raw_ip_targets: false,
+        max_depth: None,
+        user_agent: None,
         researcher_handle: Some("security-researcher".to_string()),
         policy_url: Some("https://example.com/policy".to_string()),
         excluded_checks: vec!["missing_security_headers".to_string()],
@@ -151,6 +154,7 @@ async fn test_end_to_end_mcp_session_over_duplex_stream() {
     assert!(tool_names.contains(&"list_mapped_endpoints"));
     assert!(tool_names.contains(&"list_security_findings"));
     assert!(tool_names.contains(&"generate_assessment_report"));
+    assert!(tool_names.contains(&"validate_scope"));
 
     // 6. Call tool: check_target_scope (in-scope)
     let call_scope_in = json!({

@@ -1,6 +1,6 @@
 # BountyScope Consolidated Technical Reference
 
-**Document Version:** 0.16.0  
+**Document Version:** 0.16.1  
 **Specification Level:** Final Technical Reference  
 **Applicability:** `bountyscope` CLI and Core Subsystems  
 
@@ -376,7 +376,7 @@ BountyScope features two standardized machine-readable exporters:
    - Also implemented for `bountyscope diff --format json`, rendering structured regression metrics, endpoint additions/removals, status transitions, and newly identified security issues.
 2. **OASIS SARIF v2.1.0 (`--format sarif`):**
    - Implements OASIS Static Analysis Results Interchange Format (version 2.1.0) conforming to `https://json.schemastore.org/sarif-2.1.0.json`.
-   - Driver Component: `runs[0].tool.driver` contains name `"BountyScope"`, version `"0.16.0"`, information URI, and deduplicated `rules[]` entries with title descriptions, full descriptions, and remediation guidance.
+   - Driver Component: `runs[0].tool.driver` contains name `"BountyScope"`, version `"0.16.1"`, information URI, and deduplicated `rules[]` entries with title descriptions, full descriptions, and remediation guidance.
    - Severity-to-Level Mapping:
      - `CRITICAL` / `HIGH` -> `"error"` (`security-severity: "9.0"` / `"7.0"`)
      - `MEDIUM` -> `"warning"` (`security-severity: "5.0"`)
@@ -508,3 +508,46 @@ Each distribution archive bundles:
 4. Template scope configuration: `configs/scope.example.yaml`.
 
 Every packaged archive is cryptographically hashed using SHA-256 (`.sha256`), and all assets are attached directly to the GitHub Release via `softprops/action-gh-release@v2` with automated release notes.
+
+---
+
+## 11. Configuration Safety Guardrails & Strict Scope Linting (v0.16.1)
+
+To prevent accidental out-of-scope traffic or dangerous misconfigurations prior to any network activity, BountyScope v0.16.1 introduces strict configuration linting via `ScopeConfig::lint_strict()` and the `bountyscope validate-scope --strict` CLI command (also exposed as the MCP `validate_scope` tool).
+
+### 11.1 Strict Errors (Hard Failures)
+
+When evaluated in strict mode (`--strict`), any of the following conditions produce a non-zero exit code (`1`) and abort scanning:
+
+1. **Catch-All or TLD Wildcards:**
+   - Empty `allowed_domains`.
+   - Global wildcards (`*`).
+   - Top-level domain (TLD) or public suffix wildcards (e.g., `*.com`, `*.org`, `*.in`, `*.co.uk`).
+   - Single-label hostnames without registered domain components (e.g., `com`, `internal`).
+2. **Unintended Raw IP / CIDR Targets:**
+   - Raw IPv4 addresses (e.g., `192.168.1.1`), IPv6 addresses, or CIDR blocks (e.g., `10.0.0.0/8`, `fe80::/10`) in `allowed_domains` are rejected unless explicitly authorized via `allow_raw_ip_targets: true`.
+3. **Safe Mode Invariants Violation:**
+   - `rate_limit_rps` must be between `1` and `10` requests per second.
+   - `max_depth` (if configured) must not exceed `5`.
+4. **Contradictory Boundary Rules:**
+   - Specifying an identical domain in both `allowed_domains` and `excluded_domains`.
+
+### 11.2 Strict Warnings (Best Practice Guidance)
+
+The linter also emits warnings to guide operators toward safe assessment practices:
+- **Sensitive Unauthenticated State-Changing Paths:** Missing exclusions for destructive or session-terminating endpoints (`/logout`, `/signout`, `/unsubscribe`, `/delete`).
+- **Broad Wildcard Domain Scope:** Specifying broad wildcards (`*.example.com`) without accompanying domain exclusions in `excluded_domains`.
+- **Operator Attribution Missing:** External targets configured without `researcher_handle` or `user_agent` attribution headers.
+
+### 11.3 CLI and MCP Protocol Integration
+
+- **CLI Usage:**
+  ```bash
+  # Standard human-readable strict validation
+  bountyscope validate-scope --config configs/scope.yaml --strict
+
+  # Machine-readable JSON output for pre-flight CI/CD gates
+  bountyscope validate-scope --config configs/scope.yaml --strict --json
+  ```
+- **MCP Tool:** The `validate_scope` tool accepts optional `config_yaml: string` and `strict: boolean` parameters, returning the structured `ScopeLintReport` to AI agents during automated triage sessions.
+

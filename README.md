@@ -1,6 +1,6 @@
 # BountyScope
 
-[![Version](https://img.shields.io/badge/version-0.16.0-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.16.1-blue.svg)](Cargo.toml)
 [![CI](https://github.com/Rohinthan/BountyScope/actions/workflows/ci.yml/badge.svg)](https://github.com/Rohinthan/BountyScope/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![M8ven Score](https://m8ven.ai/badge/mcp/rohinthan-bountyscope-ewsupe?v=829cb44fcc4e4b3979377337d6e8e3d5)](https://m8ven.ai/mcp/rohinthan-bountyscope-ewsupe?s=readme)
@@ -312,7 +312,7 @@ Similarly, `--output` on `report` and `scan` defaults to `data/<sanitized_progra
 
 | Command | Purpose | Input Flags | Output |
 |---|---|---|---|
-| `validate-scope` | Verifies YAML syntax and scope boundary integrity. | `[--config]` | Console validation summary |
+| `validate-scope` | Verifies YAML syntax, scope boundary integrity, and strict safety guardrails. | `[--config]`, `[--strict]`, `[--json]` | Console validation summary or structured JSON diagnostics |
 | `scan` | Unified pipeline: maps surface, audits endpoints, and exports report. | `--url`, `[--config]`, `[--db]`, `[--output]`, `[--format]` | SQLite database and Assessment report (`md`, `json`, `sarif`) |
 | `probe` | Safely evaluates and probes a single in-scope URL. | `--url`, `[--config]`, `[--db]` | HTTP status, headers, audit log entry |
 | `map` | Passively extracts links, scripts, source maps, sitemaps, security policies, and API specs from a seed URL. | `--url`, `[--config]`, `[--db]` | Discovered endpoints in SQLite |
@@ -371,13 +371,42 @@ Assessment report generated successfully: "data/example_security_program_report.
 
 ### 2. Validate Scope Configuration
 
+Standard syntax and boundary check:
 ```bash
 bountyscope validate-scope --config configs/scope.example.yaml
 ```
 
 Sample output:
 ```text
-Scope configuration valid: example-security-program (platform: hackerone, allowed_domains: 3, excluded_domains: 3, excluded_paths: 4, rate_limit_rps: 2, safe_mode: true)
+Scope configuration valid: example-security-program (platform: hackerone, allowed_domains: 3, excluded_domains: 3, excluded_paths: 7, rate_limit_rps: 2, safe_mode: true)
+```
+
+Enforce strict safety guardrails (`--strict`) to catch broad wildcards, unapproved raw IPs, and missing sensitive path exclusions:
+```bash
+bountyscope validate-scope --config configs/scope.local.yaml --strict
+```
+
+Sample output:
+```text
+Scope configuration valid (strict): local-lab-verification (platform: local, allowed_domains: 2, excluded_domains: 0, excluded_paths: 5, rate_limit_rps: 5, safe_mode: true)
+```
+
+Output structured machine-readable diagnostics (`--json`):
+```bash
+bountyscope validate-scope --config configs/scope.local.yaml --strict --json
+```
+
+Sample output:
+```json
+{
+  "valid": true,
+  "strict": true,
+  "config_path": "configs/scope.local.yaml",
+  "program_name": "local-lab-verification",
+  "platform": "local",
+  "errors": [],
+  "warnings": []
+}
 ```
 
 ### 3. Safely Probe Target Endpoint

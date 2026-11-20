@@ -376,9 +376,9 @@ researcher_handle: "format-tester"
     let json_val: serde_json::Value =
         serde_json::from_str(&json_stdout).expect("valid JSON stdout expected");
 
-    assert_eq!(json_val["schema_version"], "0.16.0");
+    assert_eq!(json_val["schema_version"], "0.16.1");
     assert_eq!(json_val["tool"]["name"], "BountyScope");
-    assert_eq!(json_val["tool"]["version"], "0.16.0");
+    assert_eq!(json_val["tool"]["version"], "0.16.1");
     assert_eq!(json_val["program"]["name"], "cli-multiformat-test");
     assert_eq!(json_val["program"]["researcher_handle"], "format-tester");
     assert!(!json_val["endpoints"]
@@ -413,7 +413,7 @@ researcher_handle: "format-tester"
         sarif_val["runs"][0]["tool"]["driver"]["name"],
         "BountyScope"
     );
-    assert_eq!(sarif_val["runs"][0]["tool"]["driver"]["version"], "0.16.0");
+    assert_eq!(sarif_val["runs"][0]["tool"]["driver"]["version"], "0.16.1");
     assert!(sarif_val["runs"][0]["tool"]["driver"]["rules"].is_array());
     assert!(sarif_val["runs"][0]["results"].is_array());
 
@@ -448,9 +448,9 @@ researcher_handle: "format-tester"
     let diff_val: serde_json::Value =
         serde_json::from_str(&diff_stdout).expect("valid JSON diff expected");
 
-    assert_eq!(diff_val["schema_version"], "0.16.0");
+    assert_eq!(diff_val["schema_version"], "0.16.1");
     assert_eq!(diff_val["tool"]["name"], "BountyScope");
-    assert_eq!(diff_val["tool"]["version"], "0.16.0");
+    assert_eq!(diff_val["tool"]["version"], "0.16.1");
     assert_eq!(diff_val["program_name"], "cli-multiformat-test");
     assert!(diff_val["metrics"].is_object());
 
@@ -482,4 +482,100 @@ researcher_handle: "format-tester"
     assert_eq!(sarif_file_val["version"], "2.1.0");
 
     let _ = std::fs::remove_file(&default_sarif_file);
+}
+
+#[test]
+fn test_validate_scope_strict_cli_exit_codes() {
+    let bin_path = env!("CARGO_BIN_EXE_bountyscope");
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+
+    // 1. Valid config (configs/scope.local.yaml) passes with exit code 0
+    let valid_cfg_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("configs/scope.local.yaml");
+    let valid_out = Command::new(bin_path)
+        .arg("validate-scope")
+        .arg("--config")
+        .arg(&valid_cfg_path)
+        .arg("--strict")
+        .output()
+        .expect("run validate-scope --strict");
+
+    assert!(
+        valid_out.status.success(),
+        "valid config should exit 0 under strict mode"
+    );
+    let stdout = String::from_utf8_lossy(&valid_out.stdout);
+    assert!(stdout.contains("Scope configuration valid (strict):"));
+
+    // 2. Valid config with --strict --json outputs structured JSON and exits 0
+    let json_out = Command::new(bin_path)
+        .arg("validate-scope")
+        .arg("--config")
+        .arg(&valid_cfg_path)
+        .arg("--strict")
+        .arg("--json")
+        .output()
+        .expect("run validate-scope --strict --json");
+
+    assert!(
+        json_out.status.success(),
+        "valid config should exit 0 with --json"
+    );
+    let json_stdout = String::from_utf8_lossy(&json_out.stdout);
+    let val: serde_json::Value = serde_json::from_str(&json_stdout).expect("valid JSON stdout");
+    assert_eq!(val["valid"], true);
+    assert_eq!(val["strict"], true);
+    assert_eq!(val["errors"].as_array().expect("errors").len(), 0);
+
+    // 3. Unsafe config: catch-all wildcard '*' fails with non-zero exit code
+    let unsafe_cfg_path = temp_dir.path().join("unsafe_scope.yaml");
+    std::fs::write(
+        &unsafe_cfg_path,
+        r#"
+program_name: "unsafe-cli-target"
+platform: "hackerone"
+allowed_domains: ["*"]
+rate_limit_rps: 2
+safe_mode: true
+"#,
+    )
+    .expect("write unsafe config");
+
+    let unsafe_out = Command::new(bin_path)
+        .arg("validate-scope")
+        .arg("--config")
+        .arg(&unsafe_cfg_path)
+        .arg("--strict")
+        .output()
+        .expect("run validate-scope on unsafe config");
+
+    assert!(
+        !unsafe_out.status.success(),
+        "unsafe config must fail with non-zero exit code"
+    );
+    let stderr = String::from_utf8_lossy(&unsafe_out.stderr);
+    assert!(stderr.contains("[ERROR] Catch-all wildcard"));
+
+    // 4. Unsafe config with --json exits non-zero but outputs parseable JSON
+    let unsafe_json_out = Command::new(bin_path)
+        .arg("validate-scope")
+        .arg("--config")
+        .arg(&unsafe_cfg_path)
+        .arg("--strict")
+        .arg("--json")
+        .output()
+        .expect("run validate-scope --json on unsafe config");
+
+    assert!(
+        !unsafe_json_out.status.success(),
+        "unsafe config with --json must exit non-zero"
+    );
+    let unsafe_json_stdout = String::from_utf8_lossy(&unsafe_json_out.stdout);
+    let unsafe_val: serde_json::Value =
+        serde_json::from_str(&unsafe_json_stdout).expect("valid JSON stdout despite failure");
+    assert_eq!(unsafe_val["valid"], false);
+    assert_eq!(unsafe_val["strict"], true);
+    assert!(!unsafe_val["errors"]
+        .as_array()
+        .expect("errors array")
+        .is_empty());
 }

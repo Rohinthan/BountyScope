@@ -4,6 +4,9 @@
 program_name: "local-lab-verification"
 platform: "local"
 
+# Opt-in to permit loopback raw IP address (127.0.0.1) under strict linting
+allow_raw_ip_targets: true
+
 # Allowed domains and loopback interfaces
 allowed_domains:
   - "127.0.0.1"
@@ -15,6 +18,10 @@ excluded_domains: []
 # Excluded URL path patterns
 excluded_paths:
   - "/api/v1/reset"
+  - "/logout"
+  - "/signout"
+  - "/unsubscribe"
+  - "/delete"
 
 # Rate limiting (requests per second)
 rate_limit_rps: 5

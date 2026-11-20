@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "bountyscope")]
-#[command(version = "0.16.0")]
+#[command(version = "0.16.1")]
 #[command(
     about = "Automated vulnerability surface mapping and passive policy verification engine",
     long_about = "BountyScope is an automated vulnerability surface mapping and passive policy verification engine designed for authorized security assessments and bug bounty programs."
@@ -34,6 +34,14 @@ enum Commands {
             default_value = "configs/scope.example.yaml"
         )]
         config: PathBuf,
+
+        /// Enforce strict safety guardrails and configuration linting
+        #[arg(long, default_value_t = false)]
+        strict: bool,
+
+        /// Output validation results in structured JSON format
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 
     /// Execute unified end-to-end passive scan: mapping, verification, and report generation
@@ -214,7 +222,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::ValidateScope { config }) => execute_validate_scope(&config),
+        Some(Commands::ValidateScope {
+            config,
+            strict,
+            json,
+        }) => execute_validate_scope(&config, strict, json),
         Some(Commands::Scan {
             url,
             config,
@@ -243,7 +255,7 @@ async fn main() -> Result<()> {
         }) => execute_diff(&config, &db, from, to, &output, stdout, format).await,
         Some(Commands::Mcp { config, db }) => execute_mcp(&config, &db).await,
         None => {
-            println!("BountyScope v0.16.0 - Vulnerability Surface Mapping Engine");
+            println!("BountyScope v0.16.1 - Vulnerability Surface Mapping Engine");
             println!("Run 'bountyscope --help' for available commands.");
             Ok(())
         }
@@ -337,24 +349,116 @@ fn resolve_diff_output_path(
     Ok(Some(path))
 }
 
-fn execute_validate_scope(config_path: &PathBuf) -> Result<()> {
-    let config = ScopeConfig::from_file(config_path)
-        .with_context(|| format!("Failed to load scope configuration from {:?}", config_path))?;
+fn execute_validate_scope(config_path: &PathBuf, strict: bool, json_output: bool) -> Result<()> {
+    let raw_content = match std::fs::read_to_string(config_path) {
+        Ok(c) => c,
+        Err(err) => {
+            if json_output {
+                let out = serde_json::json!({
+                    "valid": false,
+                    "strict": strict,
+                    "config_path": config_path.display().to_string(),
+                    "program_name": null,
+                    "errors": [format!("Failed to read configuration file: {err}")],
+                    "warnings": []
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                std::process::exit(1);
+            } else {
+                return Err(err).with_context(|| {
+                    format!("Failed to load scope configuration from {:?}", config_path)
+                });
+            }
+        }
+    };
 
-    let enforcer = ScopeEnforcer::new(config.clone())
-        .with_context(|| "Scope configuration failed validation rules")?;
+    let config = match ScopeConfig::from_yaml_str(&raw_content) {
+        Ok(c) => c,
+        Err(err) => {
+            if json_output {
+                let out = serde_json::json!({
+                    "valid": false,
+                    "strict": strict,
+                    "config_path": config_path.display().to_string(),
+                    "program_name": null,
+                    "errors": [format!("Scope configuration syntax/validation error: {err}")],
+                    "warnings": []
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                std::process::exit(1);
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Scope configuration failed validation rules: {err}"
+                ));
+            }
+        }
+    };
 
-    let conf = enforcer.config();
-    println!(
-        "Scope configuration valid: {} (platform: {}, allowed_domains: {}, excluded_domains: {}, excluded_paths: {}, rate_limit_rps: {}, safe_mode: {})",
-        conf.program_name,
-        conf.platform,
-        conf.allowed_domains.len(),
-        conf.excluded_domains.len(),
-        conf.excluded_paths.len(),
-        conf.rate_limit_rps,
-        conf.safe_mode
-    );
+    let lint_report = config.lint_strict();
+    let is_valid = if strict { lint_report.is_valid() } else { true };
+
+    if json_output {
+        let errors = if strict {
+            lint_report.errors
+        } else {
+            Vec::new()
+        };
+        let out = serde_json::json!({
+            "valid": is_valid,
+            "strict": strict,
+            "config_path": config_path.display().to_string(),
+            "program_name": config.program_name,
+            "platform": config.platform,
+            "errors": errors,
+            "warnings": lint_report.warnings,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        if !is_valid {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    if strict {
+        for err in &lint_report.errors {
+            eprintln!("[ERROR] {}", err);
+        }
+        for warn in &lint_report.warnings {
+            eprintln!("[WARN] {}", warn);
+        }
+
+        if !lint_report.is_valid() {
+            anyhow::bail!(
+                "Scope configuration failed strict validation with {} error(s)",
+                lint_report.errors.len()
+            );
+        }
+
+        println!(
+            "Scope configuration valid (strict): {} (platform: {}, allowed_domains: {}, excluded_domains: {}, excluded_paths: {}, rate_limit_rps: {}, safe_mode: {})",
+            config.program_name,
+            config.platform,
+            config.allowed_domains.len(),
+            config.excluded_domains.len(),
+            config.excluded_paths.len(),
+            config.rate_limit_rps,
+            config.safe_mode
+        );
+    } else {
+        for warn in &lint_report.warnings {
+            eprintln!("[WARN] {}", warn);
+        }
+        println!(
+            "Scope configuration valid: {} (platform: {}, allowed_domains: {}, excluded_domains: {}, excluded_paths: {}, rate_limit_rps: {}, safe_mode: {})",
+            config.program_name,
+            config.platform,
+            config.allowed_domains.len(),
+            config.excluded_domains.len(),
+            config.excluded_paths.len(),
+            config.rate_limit_rps,
+            config.safe_mode
+        );
+    }
 
     Ok(())
 }

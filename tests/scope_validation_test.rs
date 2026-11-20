@@ -192,3 +192,64 @@ fn test_adversarial_scope_edge_cases_fail_closed() {
         Err(ScopeError::DomainNotAllowed(_))
     ));
 }
+
+#[test]
+fn test_strict_linting_rules_and_reports() {
+    // 1. Valid local lab config
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let local_path = manifest_dir.join("configs/scope.local.yaml");
+    let local_cfg = ScopeConfig::from_file(&local_path).expect("local config must load");
+    let local_report = local_cfg.lint_strict();
+    assert!(local_report.is_valid());
+    assert!(local_report.warnings.is_empty());
+
+    // 2. Unsafe config: catch-all domain and unsafe rate limit
+    let unsafe_yaml = r#"
+program_name: "unsafe-program"
+platform: "hackerone"
+allowed_domains: ["*"]
+rate_limit_rps: 50
+safe_mode: true
+"#;
+    let unsafe_cfg = ScopeConfig::from_yaml_str(unsafe_yaml).expect("parse yaml");
+    let unsafe_report = unsafe_cfg.lint_strict();
+    assert!(!unsafe_report.is_valid());
+    assert!(unsafe_report.errors.iter().any(|e| e.contains("Catch-all")));
+    assert!(unsafe_report
+        .errors
+        .iter()
+        .any(|e| e.contains("rate_limit_rps")));
+
+    // 3. Raw IP without allow_raw_ip_targets
+    let raw_ip_yaml = r#"
+program_name: "raw-ip-program"
+platform: "hackerone"
+allowed_domains: ["192.168.1.50"]
+allow_raw_ip_targets: false
+rate_limit_rps: 2
+safe_mode: true
+"#;
+    let raw_ip_cfg = ScopeConfig::from_yaml_str(raw_ip_yaml).expect("parse yaml");
+    let raw_ip_report = raw_ip_cfg.lint_strict();
+    assert!(!raw_ip_report.is_valid());
+    assert!(raw_ip_report
+        .errors
+        .iter()
+        .any(|e| e.contains("Raw IP address or CIDR target")));
+
+    // 4. Raw IP with allow_raw_ip_targets: true
+    let allowed_raw_ip_yaml = r#"
+program_name: "allowed-raw-ip-program"
+platform: "hackerone"
+allowed_domains: ["192.168.1.50"]
+allow_raw_ip_targets: true
+rate_limit_rps: 2
+safe_mode: true
+"#;
+    let allowed_raw_ip_cfg = ScopeConfig::from_yaml_str(allowed_raw_ip_yaml).expect("parse yaml");
+    let allowed_raw_ip_report = allowed_raw_ip_cfg.lint_strict();
+    assert!(!allowed_raw_ip_report
+        .errors
+        .iter()
+        .any(|e| e.contains("Raw IP address or CIDR target")));
+}

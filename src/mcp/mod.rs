@@ -10,8 +10,35 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::McpError;
 use crate::report::ReportGenerator;
-use crate::scope::ScopeEnforcer;
+use crate::scope::{ScopeConfig, ScopeEnforcer};
 use crate::storage::StorageEngine;
+
+/// Parameter schema for the `validate_scope` tool.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ValidateScopeRequest {
+    /// Optional YAML configuration string to validate. If omitted, the server's active configuration is evaluated.
+    #[serde(default)]
+    pub config_yaml: Option<String>,
+    /// Whether to enforce strict safety guardrails. Defaults to true if omitted.
+    #[serde(default)]
+    pub strict: Option<bool>,
+}
+
+/// Structured response schema for the `validate_scope` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ValidateScopeResponse {
+    /// Whether the configuration passed validation rules.
+    pub valid: bool,
+    /// Whether strict safety guardrails were evaluated.
+    pub strict: bool,
+    /// Program name if configuration parsed successfully.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program_name: Option<String>,
+    /// List of validation errors (empty if valid).
+    pub errors: Vec<String>,
+    /// List of validation warnings.
+    pub warnings: Vec<String>,
+}
 
 /// Parameter schema for the `check_target_scope` tool.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -105,7 +132,7 @@ pub struct BountyScopeMcpServer {
 impl ServerHandler for BountyScopeMcpServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("bountyscope", "0.16.0"))
+            .with_server_info(Implementation::new("bountyscope", "0.16.1"))
             .with_instructions(
                 "BountyScope Model Context Protocol server exposing scope validation, mapped endpoints, security findings, assessment reports, and historical regression diffs.",
             )
@@ -287,6 +314,26 @@ impl BountyScopeMcpServer {
             })),
         }
     }
+
+    /// Validates scope configuration syntax and safety constraints with optional strict operator guardrails.
+    #[tool(
+        name = "validate_scope",
+        description = "Validates scope configuration syntax and safety constraints with optional strict operator guardrails."
+    )]
+    pub async fn validate_scope(
+        &self,
+        Parameters(params): Parameters<ValidateScopeRequest>,
+    ) -> CallToolResult {
+        let is_strict = params.strict.unwrap_or(true);
+        let resp = self.evaluate_config_scope(params.config_yaml.as_deref(), is_strict);
+        match serde_json::to_value(&resp) {
+            Ok(val) => CallToolResult::structured(val),
+            Err(e) => CallToolResult::structured_error(serde_json::json!({
+                "error": "SerializationError",
+                "message": e.to_string(),
+            })),
+        }
+    }
 }
 
 impl BountyScopeMcpServer {
@@ -313,6 +360,46 @@ impl BountyScopeMcpServer {
                 normalized_url: None,
                 reason: Some(err.to_string()),
             },
+        }
+    }
+
+    /// Validates a scope configuration either from raw YAML or against the active server configuration.
+    pub fn evaluate_config_scope(
+        &self,
+        config_yaml: Option<&str>,
+        strict: bool,
+    ) -> ValidateScopeResponse {
+        let config = match config_yaml {
+            Some(raw) => match ScopeConfig::from_yaml_str(raw) {
+                Ok(c) => c,
+                Err(e) => {
+                    return ValidateScopeResponse {
+                        valid: false,
+                        strict,
+                        program_name: None,
+                        errors: vec![format!("Failed to parse YAML scope configuration: {e}")],
+                        warnings: Vec::new(),
+                    }
+                }
+            },
+            None => self.enforcer.config().clone(),
+        };
+
+        let report = config.lint_strict();
+        let valid = if strict {
+            report.is_valid()
+        } else {
+            config.validate().is_ok()
+        };
+
+        let errors = if strict { report.errors } else { Vec::new() };
+
+        ValidateScopeResponse {
+            valid,
+            strict,
+            program_name: Some(config.program_name),
+            errors,
+            warnings: report.warnings,
         }
     }
 
@@ -444,6 +531,9 @@ mod tests {
             excluded_paths: vec!["/logout".to_string()],
             rate_limit_rps: 10,
             safe_mode: true,
+            allow_raw_ip_targets: false,
+            max_depth: None,
+            user_agent: None,
             researcher_handle: Some("security-researcher".to_string()),
             policy_url: Some("https://example.com/policy".to_string()),
             excluded_checks: vec!["missing_security_headers".to_string()],
@@ -716,5 +806,55 @@ mod tests {
             .as_str()
             .expect("md report")
             .contains("New Endpoints Discovered (1)"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_scope_mcp_tool() {
+        let config = test_scope_config();
+        let enforcer = ScopeEnforcer::new(config).expect("enforcer creation failed");
+        let storage = StorageEngine::open_in_memory().expect("storage creation failed");
+        let server = BountyScopeMcpServer::new(enforcer, storage);
+
+        // 1. Validate active configuration with strict mode
+        let res1 = server
+            .validate_scope(Parameters(ValidateScopeRequest {
+                config_yaml: None,
+                strict: Some(true),
+            }))
+            .await;
+        assert_eq!(res1.is_error, Some(false));
+        let val1 = res1.structured_content.expect("structured content");
+        assert_eq!(val1["program_name"], "mcp-test-app");
+        assert_eq!(val1["strict"], true);
+
+        // 2. Validate custom YAML containing prohibited catch-all wildcard
+        let bad_yaml = r#"
+program_name: "wildcard-target"
+platform: "hackerone"
+allowed_domains: ["*"]
+rate_limit_rps: 2
+safe_mode: true
+"#;
+        let res2 = server
+            .validate_scope(Parameters(ValidateScopeRequest {
+                config_yaml: Some(bad_yaml.to_string()),
+                strict: Some(true),
+            }))
+            .await;
+        assert_eq!(res2.is_error, Some(false));
+        let val2 = res2.structured_content.expect("structured content");
+        assert_eq!(val2["valid"], false);
+        assert!(!val2["errors"].as_array().expect("errors").is_empty());
+
+        // 3. Same YAML with strict: false should pass standard validation
+        let res3 = server
+            .validate_scope(Parameters(ValidateScopeRequest {
+                config_yaml: Some(bad_yaml.to_string()),
+                strict: Some(false),
+            }))
+            .await;
+        assert_eq!(res3.is_error, Some(false));
+        let val3 = res3.structured_content.expect("structured content");
+        assert_eq!(val3["valid"], true);
     }
 }

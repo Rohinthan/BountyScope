@@ -4,6 +4,10 @@
 program_name: "example-security-program"
 platform: "hackerone"
 
+# Opt-in to permit raw IPv4/IPv6 addresses or CIDR blocks in allowed_domains (default: false)
+# When false, strict linting requires fully qualified domain names rather than raw IP addresses.
+allow_raw_ip_targets: false
+
 # Allowed root and subdomains permitted for inspection
 allowed_domains:
   - "example.com"
@@ -19,6 +23,9 @@ excluded_domains:
 # Excluded URL path patterns (logout, account deletion, sensitive forms)
 excluded_paths:
   - "/logout"
+  - "/signout"
+  - "/unsubscribe"
+  - "/delete"
   - "/delete-account"
   - "/reset-password"
   - "/admin/purge"
