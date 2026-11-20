@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, Implementation, ServerCapabilities, ServerConfig},
+    model::{CallToolResult, Implementation, ServerCapabilities, ServerConfig, Tool},
     tool, tool_handler, tool_router, ServerHandler,
 };
 use schemars::JsonSchema;
@@ -153,7 +153,14 @@ impl BountyScopeMcpServer {
     /// Evaluates whether a target URL is within authorized scope boundaries and returns canonicalization details.
     #[tool(
         name = "check_target_scope",
-        description = "Evaluates whether a target URL is within authorized scope boundaries and returns canonicalization details."
+        description = "Evaluates whether a target URL is within authorized scope boundaries and returns canonicalization details.",
+        annotations(
+            title = "Check Target Scope",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     pub async fn check_target_scope(
         &self,
@@ -172,7 +179,14 @@ impl BountyScopeMcpServer {
     /// Queries stored surface endpoints for the active program from the database.
     #[tool(
         name = "list_mapped_endpoints",
-        description = "Queries stored surface endpoints for the active program from the database."
+        description = "Queries stored surface endpoints for the active program from the database.",
+        annotations(
+            title = "List Mapped Endpoints",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     pub async fn list_mapped_endpoints(
         &self,
@@ -196,7 +210,14 @@ impl BountyScopeMcpServer {
     /// Queries security verification findings from storage, optionally filtered by severity level.
     #[tool(
         name = "list_security_findings",
-        description = "Queries security verification findings from storage, optionally filtered by severity level."
+        description = "Queries security verification findings from storage, optionally filtered by severity level.",
+        annotations(
+            title = "List Security Findings",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     pub async fn list_security_findings(
         &self,
@@ -220,7 +241,14 @@ impl BountyScopeMcpServer {
     /// Generates the complete Markdown assessment report summarizing mapped endpoints and security verification findings.
     #[tool(
         name = "generate_assessment_report",
-        description = "Generates the complete Markdown assessment report summarizing mapped endpoints and security verification findings."
+        description = "Generates the complete Markdown assessment report summarizing mapped endpoints and security verification findings.",
+        annotations(
+            title = "Generate Assessment Report",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     pub async fn generate_assessment_report(
         &self,
@@ -240,7 +268,14 @@ impl BountyScopeMcpServer {
     /// Computes regressions and attack surface differences between historical scan runs.
     #[tool(
         name = "diff_latest_scans",
-        description = "Computes regressions and attack surface differences between historical scan runs."
+        description = "Computes regressions and attack surface differences between historical scan runs.",
+        annotations(
+            title = "Diff Latest Scans",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     pub async fn diff_latest_scans(
         &self,
@@ -318,7 +353,14 @@ impl BountyScopeMcpServer {
     /// Validates scope configuration syntax and safety constraints with optional strict operator guardrails.
     #[tool(
         name = "validate_scope",
-        description = "Validates scope configuration syntax and safety constraints with optional strict operator guardrails."
+        description = "Validates scope configuration syntax and safety constraints with optional strict operator guardrails.",
+        annotations(
+            title = "Validate Scope",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     pub async fn validate_scope(
         &self,
@@ -337,6 +379,11 @@ impl BountyScopeMcpServer {
 }
 
 impl BountyScopeMcpServer {
+    /// Returns the list of registered tools and their annotations.
+    pub fn list_tools(&self) -> Vec<Tool> {
+        self.tool_router.list_all()
+    }
+
     /// Returns a reference to the underlying `ScopeEnforcer`.
     pub fn enforcer(&self) -> &ScopeEnforcer {
         &self.enforcer
@@ -856,5 +903,99 @@ safe_mode: true
         assert_eq!(res3.is_error, Some(false));
         let val3 = res3.structured_content.expect("structured content");
         assert_eq!(val3["valid"], true);
+    }
+
+    #[test]
+    fn test_list_tools_explicit_mcp_tool_annotations() {
+        let config = test_scope_config();
+        let enforcer = ScopeEnforcer::new(config).expect("enforcer creation failed");
+        let storage = StorageEngine::open_in_memory().expect("storage creation failed");
+        let server = BountyScopeMcpServer::new(enforcer, storage);
+
+        let tools = server.list_tools();
+        assert!(
+            tools.len() >= 5,
+            "Expected at least 5 registered MCP tools, found {}",
+            tools.len()
+        );
+
+        let serialized_json = serde_json::to_value(&tools).expect("serialization to JSON failed");
+        let tool_array = serialized_json.as_array().expect("tools array in JSON");
+
+        let expected_tools = [
+            "check_target_scope",
+            "list_mapped_endpoints",
+            "list_security_findings",
+            "generate_assessment_report",
+            "diff_latest_scans",
+            "validate_scope",
+        ];
+
+        for tool_name in &expected_tools {
+            let tool_obj = tool_array
+                .iter()
+                .find(|t| t["name"].as_str() == Some(tool_name))
+                .unwrap_or_else(|| {
+                    panic!("Expected tool '{}' not found in serialized list", tool_name)
+                });
+
+            let annotations = &tool_obj["annotations"];
+            assert!(
+                annotations.is_object(),
+                "Tool '{}' missing annotations object in JSON: {:?}",
+                tool_name,
+                tool_obj
+            );
+
+            assert_eq!(
+                annotations["readOnlyHint"].as_bool(),
+                Some(true),
+                "Tool '{}' readOnlyHint must be true",
+                tool_name
+            );
+            assert_eq!(
+                annotations["destructiveHint"].as_bool(),
+                Some(false),
+                "Tool '{}' destructiveHint must be false",
+                tool_name
+            );
+            assert_eq!(
+                annotations["idempotentHint"].as_bool(),
+                Some(true),
+                "Tool '{}' idempotentHint must be true",
+                tool_name
+            );
+            assert_eq!(
+                annotations["openWorldHint"].as_bool(),
+                Some(false),
+                "Tool '{}' openWorldHint must be false",
+                tool_name
+            );
+        }
+
+        for tool in tool_array {
+            let name = tool["name"].as_str().unwrap_or("unknown");
+            let ann = &tool["annotations"];
+            assert!(
+                ann["readOnlyHint"].is_boolean(),
+                "Tool '{}' readOnlyHint is not a boolean",
+                name
+            );
+            assert!(
+                ann["destructiveHint"].is_boolean(),
+                "Tool '{}' destructiveHint is not a boolean",
+                name
+            );
+            assert!(
+                ann["idempotentHint"].is_boolean(),
+                "Tool '{}' idempotentHint is not a boolean",
+                name
+            );
+            assert!(
+                ann["openWorldHint"].is_boolean(),
+                "Tool '{}' openWorldHint is not a boolean",
+                name
+            );
+        }
     }
 }

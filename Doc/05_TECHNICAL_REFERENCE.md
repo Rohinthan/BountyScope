@@ -550,4 +550,5 @@ The linter also emits warnings to guide operators toward safe assessment practic
   bountyscope validate-scope --config configs/scope.yaml --strict --json
   ```
 - **MCP Tool:** The `validate_scope` tool accepts optional `config_yaml: string` and `strict: boolean` parameters, returning the structured `ScopeLintReport` to AI agents during automated triage sessions.
+- **MCP Tool Annotations:** Every MCP tool explicitly signals standard capability hints (`read_only_hint: true`, `destructive_hint: false`, `idempotent_hint: true`, and `open_world_hint: false`) in `ToolAnnotations` so consuming AI systems and MCP clients operate with verified safety invariants.
 

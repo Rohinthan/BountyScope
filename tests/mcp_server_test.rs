@@ -156,6 +156,31 @@ async fn test_end_to_end_mcp_session_over_duplex_stream() {
     assert!(tool_names.contains(&"generate_assessment_report"));
     assert!(tool_names.contains(&"validate_scope"));
 
+    for tool in tools {
+        let name = tool["name"].as_str().expect("name");
+        let ann = &tool["annotations"];
+        assert_eq!(
+            ann["readOnlyHint"].as_bool(),
+            Some(true),
+            "tool {name} readOnlyHint must be true"
+        );
+        assert_eq!(
+            ann["destructiveHint"].as_bool(),
+            Some(false),
+            "tool {name} destructiveHint must be false"
+        );
+        assert_eq!(
+            ann["idempotentHint"].as_bool(),
+            Some(true),
+            "tool {name} idempotentHint must be true"
+        );
+        assert_eq!(
+            ann["openWorldHint"].as_bool(),
+            Some(false),
+            "tool {name} openWorldHint must be false"
+        );
+    }
+
     // 6. Call tool: check_target_scope (in-scope)
     let call_scope_in = json!({
         "jsonrpc": "2.0",

@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Missing recommended state-changing / sensitive GET path exclusions (`/logout`, `/signout`, `/unsubscribe`, `/delete`).
     - Multi-label wildcard notice (`*.example.com`) when `excluded_domains` is empty.
     - Missing program identifier or contact attribution (`researcher_handle` or `user_agent`) when targeting external domains.
-- **Model Context Protocol (MCP) `validate_scope` Tool:**
+- **Model Context Protocol (MCP) `validate_scope` Tool & Explicit `ToolAnnotations`:**
   - Added native `validate_scope` tool to `BountyScopeMcpServer` accepting optional `strict: Option<bool>` (defaulting to `true`) and optional raw YAML configuration string.
   - Exposes structured validation diagnostics directly to AI agents and automated triage clients over JSON-RPC 2.0.
+  - Configured explicit `ToolAnnotations` hints across all registered MCP tools (`read_only_hint: true`, `destructive_hint: false`, `idempotent_hint: true`, `open_world_hint: false`), ensuring transparent capability signaling for AI orchestrators.
