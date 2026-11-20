@@ -151,6 +151,22 @@ pub struct DiffTechItem {
     pub evidence: String,
 }
 
+/// Represents a subdomain addition or removal in a regression diff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffSubdomainItem {
+    pub hostname: String,
+    pub source: String,
+    pub url: String,
+}
+
+/// Represents a discovered subdomain record stored in SQLite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveredSubdomainRecord {
+    pub hostname: String,
+    pub source: String,
+    pub url: String,
+}
+
 /// Consolidated differential analysis between two historical scan snapshots.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanDiff {
@@ -165,6 +181,8 @@ pub struct ScanDiff {
     pub resolved_findings: Vec<DiffFindingItem>,
     pub new_technologies: Vec<DiffTechItem>,
     pub removed_technologies: Vec<DiffTechItem>,
+    pub new_subdomains: Vec<DiffSubdomainItem>,
+    pub removed_subdomains: Vec<DiffSubdomainItem>,
 }
 
 /// Thread-safe SQLite storage engine managing assessment data and audit trails.
@@ -861,6 +879,36 @@ impl StorageEngine {
         Ok(list)
     }
 
+    /// Queries all discovered unique subdomains for a program, ordered by hostname.
+    pub fn get_subdomains_for_program(
+        &self,
+        program_id: &str,
+    ) -> Result<Vec<DiscoveredSubdomainRecord>, StorageError> {
+        let conn = self.conn.lock().map_err(|_| StorageError::LockFailure)?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT host, discovered_via, MIN(url)
+            FROM endpoints
+            WHERE program_id = ?1
+            GROUP BY host
+            ORDER BY host ASC
+            "#,
+        )?;
+        let rows = stmt.query_map(params![program_id], |row| {
+            Ok(DiscoveredSubdomainRecord {
+                hostname: row.get(0)?,
+                source: row.get(1)?,
+                url: row.get(2)?,
+            })
+        })?;
+
+        let mut subs = Vec::new();
+        for r in rows {
+            subs.push(r?);
+        }
+        Ok(subs)
+    }
+
     /// Captures a complete snapshot of all mapped endpoints and findings for the given program.
     /// Returns the assigned scan run ID.
     pub fn record_scan_snapshot(&self, program_id: &str) -> Result<i64, StorageError> {
@@ -1006,6 +1054,35 @@ impl StorageEngine {
             }
         }
 
+        // 8. Insert subdomain snapshot items
+        {
+            let mut sub_stmt = tx.prepare(
+                r#"
+                SELECT host, discovered_via, MIN(url)
+                FROM endpoints
+                WHERE program_id = ?1
+                GROUP BY host
+                "#,
+            )?;
+            let sub_rows = sub_stmt.query_map(params![program_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            let mut item_stmt = tx.prepare(
+                r#"
+                INSERT INTO scan_snapshot_items (scan_run_id, item_type, item_key, status_or_severity, summary)
+                VALUES (?1, 'subdomain', ?2, ?3, ?4)
+                "#,
+            )?;
+            for r in sub_rows {
+                let (host, discovered_via, min_url) = r?;
+                item_stmt.execute(params![scan_run_id, host, discovered_via, min_url])?;
+            }
+        }
+
         tx.commit()?;
         Ok(scan_run_id)
     }
@@ -1129,6 +1206,7 @@ impl StorageEngine {
         let mut baseline_endpoints: HashMap<String, ScanSnapshotItemRecord> = HashMap::new();
         let mut baseline_findings: HashMap<String, ScanSnapshotItemRecord> = HashMap::new();
         let mut baseline_technologies: HashMap<String, ScanSnapshotItemRecord> = HashMap::new();
+        let mut baseline_subdomains: HashMap<String, ScanSnapshotItemRecord> = HashMap::new();
         for r in baseline_rows {
             let item = r?;
             if item.item_type == "endpoint" {
@@ -1137,6 +1215,8 @@ impl StorageEngine {
                 baseline_findings.insert(item.item_key.clone(), item);
             } else if item.item_type == "technology" {
                 baseline_technologies.insert(item.item_key.clone(), item);
+            } else if item.item_type == "subdomain" {
+                baseline_subdomains.insert(item.item_key.clone(), item);
             }
         }
 
@@ -1158,6 +1238,7 @@ impl StorageEngine {
         let mut current_endpoints: HashMap<String, ScanSnapshotItemRecord> = HashMap::new();
         let mut current_findings: HashMap<String, ScanSnapshotItemRecord> = HashMap::new();
         let mut current_technologies: HashMap<String, ScanSnapshotItemRecord> = HashMap::new();
+        let mut current_subdomains: HashMap<String, ScanSnapshotItemRecord> = HashMap::new();
         for r in current_rows {
             let item = r?;
             if item.item_type == "endpoint" {
@@ -1166,6 +1247,8 @@ impl StorageEngine {
                 current_findings.insert(item.item_key.clone(), item);
             } else if item.item_type == "technology" {
                 current_technologies.insert(item.item_key.clone(), item);
+            } else if item.item_type == "subdomain" {
+                current_subdomains.insert(item.item_key.clone(), item);
             }
         }
 
@@ -1296,6 +1379,31 @@ impl StorageEngine {
                 .then_with(|| a.name.cmp(&b.name))
         });
 
+        // Subdomain deltas
+        let mut new_subdomains = Vec::new();
+        for (key, cur_item) in &current_subdomains {
+            if !baseline_subdomains.contains_key(key) {
+                new_subdomains.push(DiffSubdomainItem {
+                    hostname: cur_item.item_key.clone(),
+                    source: cur_item.status_or_severity.clone(),
+                    url: cur_item.summary.clone(),
+                });
+            }
+        }
+        new_subdomains.sort_by(|a, b| a.hostname.cmp(&b.hostname));
+
+        let mut removed_subdomains = Vec::new();
+        for (key, base_item) in &baseline_subdomains {
+            if !current_subdomains.contains_key(key) {
+                removed_subdomains.push(DiffSubdomainItem {
+                    hostname: base_item.item_key.clone(),
+                    source: base_item.status_or_severity.clone(),
+                    url: base_item.summary.clone(),
+                });
+            }
+        }
+        removed_subdomains.sort_by(|a, b| a.hostname.cmp(&b.hostname));
+
         Ok(ScanDiff {
             program_id: program_id.to_string(),
             program_name,
@@ -1308,6 +1416,8 @@ impl StorageEngine {
             resolved_findings,
             new_technologies,
             removed_technologies,
+            new_subdomains,
+            removed_subdomains,
         })
     }
 
@@ -1901,7 +2011,23 @@ mod tests {
         };
         storage.upsert_finding(&f3).expect("upsert f3 failed");
 
-        // 5. Shift technology: remove Nginx, add Cloudflare
+        // 5. Add new CT discovered subdomain
+        let ct_ep = EndpointEntry {
+            program_id: program_id.clone(),
+            url: "https://api.example.com/".to_string(),
+            host: "api.example.com".to_string(),
+            path: "/".to_string(),
+            method: "GET".to_string(),
+            discovered_via: "ct_log".to_string(),
+            status_code: None,
+            response_size: None,
+            content_type: None,
+        };
+        storage
+            .upsert_endpoint(&ct_ep)
+            .expect("upsert ct_ep failed");
+
+        // 6. Shift technology: remove Nginx, add Cloudflare
         {
             let conn = storage.conn.lock().expect("lock failed");
             conn.execute("DELETE FROM detected_technologies WHERE name = 'Nginx'", [])
@@ -1936,7 +2062,10 @@ mod tests {
         // Verify deltas
         assert_eq!(
             diff.new_endpoints,
-            vec!["https://example.com/api/v1/new_ep".to_string()]
+            vec![
+                "https://api.example.com/".to_string(),
+                "https://example.com/api/v1/new_ep".to_string(),
+            ]
         );
         assert_eq!(
             diff.removed_endpoints,
@@ -1969,5 +2098,19 @@ mod tests {
         assert_eq!(diff.removed_technologies.len(), 1);
         assert_eq!(diff.removed_technologies[0].name, "Nginx");
         assert_eq!(diff.removed_technologies[0].category, "WebServer");
+
+        assert_eq!(diff.new_subdomains.len(), 1);
+        assert_eq!(diff.new_subdomains[0].hostname, "api.example.com");
+        assert_eq!(diff.new_subdomains[0].source, "ct_log");
+        assert_eq!(diff.new_subdomains[0].url, "https://api.example.com/");
+        assert_eq!(diff.removed_subdomains.len(), 0);
+
+        let subs = storage
+            .get_subdomains_for_program(&program_id)
+            .expect("get_subdomains failed");
+        assert_eq!(subs.len(), 2);
+        assert_eq!(subs[0].hostname, "api.example.com");
+        assert_eq!(subs[0].source, "ct_log");
+        assert_eq!(subs[1].hostname, "example.com");
     }
 }

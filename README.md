@@ -1,6 +1,6 @@
 # BountyScope
 
-[![Version](https://img.shields.io/badge/version-0.16.2-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.16.3-blue.svg)](Cargo.toml)
 [![CI](https://github.com/Rohinthan/BountyScope/actions/workflows/ci.yml/badge.svg)](https://github.com/Rohinthan/BountyScope/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![M8ven Score](https://m8ven.ai/badge/mcp/rohinthan-bountyscope-ewsupe?v=829cb44fcc4e4b3979377337d6e8e3d5)](https://m8ven.ai/mcp/rohinthan-bountyscope-ewsupe?s=readme)
@@ -313,9 +313,10 @@ Similarly, `--output` on `report` and `scan` defaults to `data/<sanitized_progra
 | Command | Purpose | Input Flags | Output |
 |---|---|---|---|
 | `validate-scope` | Verifies YAML syntax, scope boundary integrity, and strict safety guardrails. | `[--config]`, `[--strict]`, `[--json]` | Console validation summary or structured JSON diagnostics |
-| `scan` | Unified pipeline: maps surface, audits endpoints, and exports report. | `--url`, `[--config]`, `[--db]`, `[--output]`, `[--format]` | SQLite database and Assessment report (`md`, `json`, `sarif`) |
+| `scan` | Unified pipeline: maps surface, audits endpoints, and exports report. | `--url`, `[--config]`, `[--db]`, `[--output]`, `[--format]`, `[--enable-ct]` | SQLite database and Assessment report (`md`, `json`, `sarif`) |
 | `probe` | Safely evaluates and probes a single in-scope URL. | `--url`, `[--config]`, `[--db]` | HTTP status, headers, audit log entry |
-| `map` | Passively extracts links, scripts, source maps, sitemaps, security policies, and API specs from a seed URL. | `--url`, `[--config]`, `[--db]` | Discovered endpoints in SQLite |
+| `map` | Passively extracts links, scripts, source maps, sitemaps, security policies, and API specs from a seed URL. | `--url`, `[--config]`, `[--db]`, `[--enable-ct]` | Discovered endpoints in SQLite |
+| `ct` | Passively discovers in-scope subdomains via public Certificate Transparency logs (`crt.sh`). | `[--config]`, `[--json]`, `[--db]` | Discovered subdomains in console or JSON |
 | `audit` | Evaluates HTTP headers, CORS policies, and spec disclosures. | `[--config]`, `[--db]` | Audit findings summary |
 | `report` | Generates assessment reports in Markdown, JSON, or OASIS SARIF v2.1.0 format. | `[--config]`, `[--db]`, `[--output]`, `[--stdout]`, `[--format]` | Assessment report (`md`, `json`, or `sarif`) |
 | `diff` | Compares historical scan snapshots to identify regressions, status transitions, and surface deltas. | `[--config]`, `[--db]`, `[--from]`, `[--to]`, `[--output]`, `[--stdout]`, `[--format]` | Diff report (`md` or `json`) |
@@ -331,6 +332,7 @@ Understanding the exact network, database, and filesystem modifications executed
 | `scan` | Sends rate-limited GET requests to discover and audit endpoints | Populates and updates `programs`, `scope_rules`, `endpoints`, `findings`, and `audit_logs` | Creates/updates `data/<program>.db` and writes `data/<program>_report.md` | Re-running refreshes existing records and updates timestamps without duplicating rows. |
 | `probe` | Sends exactly **1 HTTP GET request** to the target URL | Appends a single row to the `audit_logs` table | Creates parent `data/` directory and database file if not already present | Safe to re-run; appends an additional audit log record with new latency and timestamp. |
 | `map` | Sends rate-limited GET requests to crawl HTML links, script tags, routes, and `robots.txt` | Upserts discovered URLs into `endpoints`; appends each request to `audit_logs` | Creates/updates `data/<program>.db` | Re-running updates `last_verified_at` timestamps on existing endpoints without creating duplicate rows. |
+| `ct` | Sends passive GET request to public CT log (`crt.sh`) for eligible base domains | Upserts discovered in-scope hostnames into `endpoints` table | Creates/updates `data/<program>.db` | Completely idempotent; skips out-of-scope SANs and updates existing endpoints. |
 | `audit` | Sends non-destructive GET requests with audit test headers (CORS origins, spec paths) | Upserts policy violations into `findings`; appends each check to `audit_logs` | Updates `data/<program>.db` | Re-running updates existing finding evidence in place; does not multiply finding counts. |
 | `report` | **Zero requests** (Offline) | **None** (Read-only query of existing records) | Writes or updates `data/<program>_report.md` (or prints to terminal if `--stdout` is set) | Completely idempotent; reconstructs the report directly from current database state. |
 | `diff` | **Zero requests** (Offline) | **None** (Read-only query of historical snapshots) | Writes `data/<program>_diff.md` (or prints to terminal if `--stdout` is set) | Completely idempotent; compares historical snapshot runs without mutating database. |
@@ -545,7 +547,24 @@ bountyscope diff --config configs/scope.example.yaml --stdout
 bountyscope diff --from 1 --to 2 --config configs/scope.example.yaml
 ```
 
-### 8. Serve Model Context Protocol (MCP)
+### 8. Passive Certificate Transparency Subdomain Discovery (`bountyscope ct`)
+
+Uncover authorized in-scope subdomains from public Certificate Transparency (CT) logs (`crt.sh`) before or during mapping:
+
+```bash
+# Query CT logs for all eligible base domains and print discovered subdomains
+bountyscope ct --config configs/scope.example.yaml
+
+# Output discovered subdomains in structured JSON format
+bountyscope ct --config configs/scope.example.yaml --json
+
+# Run unified scan with CT subdomain discovery enabled
+bountyscope scan --url https://example.com/ --config configs/scope.example.yaml --enable-ct
+```
+
+Every candidate hostname discovered via CT logs is validated against `ScopeEnforcer::validate_url()`—guaranteeing that out-of-scope or excluded subdomains are dropped immediately.
+
+### 9. Serve Model Context Protocol (MCP)
 
 ```bash
 bountyscope mcp --config configs/scope.example.yaml
@@ -581,7 +600,7 @@ BountyScope implements a native Model Context Protocol (MCP) server conforming t
 
 5. **`diff_latest_scans`**
    - **Input:** `{ "from_run_id": 1, "to_run_id": 2 }` (both optional; defaults to comparing the latest two scan runs)
-   - **Output:** Structured delta summary including `new_endpoints`, `removed_endpoints`, `status_changes`, `new_findings`, `resolved_findings`, `new_technologies`, `removed_technologies`, and full `markdown_report`.
+   - **Output:** Structured delta summary including `new_endpoints`, `removed_endpoints`, `status_changes`, `new_findings`, `resolved_findings`, `new_technologies`, `removed_technologies`, `new_subdomains`, `removed_subdomains`, and full `markdown_report`.
    - **Function:** Computes regressions and attack surface differences between historical scan runs.
 
 6. **`validate_scope`**
@@ -593,6 +612,11 @@ BountyScope implements a native Model Context Protocol (MCP) server conforming t
    - **Input:** `{ "category": "WafCdn" }` (optional filter: `WafCdn`, `WebServer`, `Framework`, `Cms`, `HostingPlatform`)
    - **Output:** Array of passively identified technologies (`name`, `category`, `version`, `evidence`, `endpoint`).
    - **Function:** Queries passively fingerprinted technologies, web servers, and reverse-proxy infrastructure stored in SQLite.
+
+8. **`list_discovered_subdomains`**
+   - **Input:** `{ "source": "ct_log" }` (optional filter: `ct_log`, `js_subdomain`, `sitemap_xml`)
+   - **Output:** Array of discovered in-scope subdomains (`hostname`, `source`, `url`).
+   - **Function:** Queries discovered in-scope subdomains uncovered across certificate logs and surface discovery.
 
 ### MCP Client Configuration
 

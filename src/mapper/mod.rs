@@ -47,6 +47,7 @@ pub struct SurfaceMapper<'a> {
     http_client: &'a ScopedHttpClient,
     storage: &'a StorageEngine,
     program_id: String,
+    enable_ct: bool,
     route_regex: Regex,
     full_url_regex: Regex,
     source_map_regex: Regex,
@@ -75,12 +76,19 @@ impl<'a> SurfaceMapper<'a> {
             http_client,
             storage,
             program_id,
+            enable_ct: false,
             route_regex,
             full_url_regex,
             source_map_regex,
             sitemap_loc_regex,
             sec_url_regex,
         })
+    }
+
+    /// Configures whether passive Certificate Transparency (crt.sh) subdomain discovery is performed.
+    pub fn with_ct_discovery(mut self, enable_ct: bool) -> Self {
+        self.enable_ct = enable_ct;
+        self
     }
 
     /// Performs passive surface mapping starting from a seed URL within authorized scope.
@@ -164,6 +172,12 @@ impl<'a> SurfaceMapper<'a> {
         self.discover_openapi_specs(seed, &mut discovered_map, &mut out_of_scope_discarded)
             .await?;
 
+        // Discover Certificate Transparency log subdomains if enabled
+        if self.enable_ct {
+            self.discover_ct_subdomains(&mut discovered_map, &mut out_of_scope_discarded)
+                .await;
+        }
+
         // Persist all discovered endpoints into storage
         for endpoint in discovered_map.values() {
             let entry = EndpointEntry {
@@ -207,6 +221,37 @@ impl<'a> SurfaceMapper<'a> {
             let _ = self
                 .storage
                 .upsert_detected_technology(&self.program_id, &tech);
+        }
+    }
+
+    /// Discovers in-scope subdomains via public Certificate Transparency logs (crt.sh).
+    async fn discover_ct_subdomains(
+        &self,
+        discovered_map: &mut BTreeMap<String, DiscoveredEndpoint>,
+        _out_of_scope_discarded: &mut usize,
+    ) {
+        let discoverer = match crate::ct::CtLogDiscoverer::new(
+            std::time::Duration::from_secs(10),
+            self.enforcer.config().user_agent.as_deref(),
+            self.enforcer.config().researcher_handle.as_deref(),
+        ) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+
+        let subdomains = discoverer.discover_all_subdomains(self.enforcer).await;
+        for sub in subdomains {
+            discovered_map
+                .entry(sub.url.clone())
+                .or_insert_with(|| DiscoveredEndpoint {
+                    url: sub.url,
+                    host: sub.hostname,
+                    path: "/".to_string(),
+                    discovered_via: "ct_log".to_string(),
+                    status_code: None,
+                    response_size: None,
+                    content_type: None,
+                });
         }
     }
 

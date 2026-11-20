@@ -1,6 +1,6 @@
 # BountyScope Consolidated Technical Reference
 
-**Document Version:** 0.16.2  
+**Document Version:** 0.16.3  
 **Specification Level:** Final Technical Reference  
 **Applicability:** `bountyscope` CLI and Core Subsystems  
 
@@ -376,7 +376,7 @@ BountyScope features two standardized machine-readable exporters:
    - Also implemented for `bountyscope diff --format json`, rendering structured regression metrics, endpoint additions/removals, status transitions, and newly identified security issues.
 2. **OASIS SARIF v2.1.0 (`--format sarif`):**
    - Implements OASIS Static Analysis Results Interchange Format (version 2.1.0) conforming to `https://json.schemastore.org/sarif-2.1.0.json`.
-   - Driver Component: `runs[0].tool.driver` contains name `"BountyScope"`, version `"0.16.2"`, information URI, and deduplicated `rules[]` entries with title descriptions, full descriptions, and remediation guidance.
+   - Driver Component: `runs[0].tool.driver` contains name `"BountyScope"`, version `"0.16.3"`, information URI, and deduplicated `rules[]` entries with title descriptions, full descriptions, and remediation guidance.
    - Severity-to-Level Mapping:
      - `CRITICAL` / `HIGH` -> `"error"` (`security-severity: "9.0"` / `"7.0"`)
      - `MEDIUM` -> `"warning"` (`security-severity: "5.0"`)
@@ -610,5 +610,40 @@ Detected technologies are categorized into five distinct architectural layers:
 - **MCP Server:**
   - Added `list_detected_technologies` tool with explicit `ToolAnnotations` (`read_only_hint: true`, `destructive_hint: false`, `idempotent_hint: true`, `open_world_hint: false`).
   - Added detected technology regression metrics to `diff_latest_scans` outputs.
+
+---
+
+## 13. Scope-Locked Passive Subdomain Discovery via Certificate Transparency (v0.16.3)
+
+BountyScope v0.16.3 introduces a dedicated, scope-locked passive Certificate Transparency (CT) subdomain discoverer (`CtLogDiscoverer` in `src/ct/mod.rs`). The engine queries public CT logs (`https://crt.sh/?q=%.<base_domain>&output=json`) to surface valid, registered subdomains while strictly enforcing scope boundary validation on every candidate hostname before storage or seed probing.
+
+### 13.1 Eligible Base Domain Extraction
+
+To ensure compliance with bug bounty rules of engagement and prevent wasteful queries, `extract_eligible_base_domains` processes `ScopeConfig::allowed_domains` with strict filtering:
+- **Exclusion of IP Targets & Localhost:** Raw IPv4, IPv6 addresses, and loopback identifiers (`localhost`, `127.0.0.1`, `::1`) are immediately skipped.
+- **Exclusion of Wildcards & TLD Fragments:** Broad top-level wildcards (`*`, `*.com`) and single-label entries are ignored.
+- **Normalization to Registered Base Domain:** Normalized hostnames and wildcard subdomains (`*.example.com` or `api.example.com`) are stripped down to their registered base domain (`example.com`) and deduplicated.
+
+### 13.2 Multiline SAN Parsing & Zero-Cost Scope Filtering
+
+Public certificates frequently declare Subject Alternative Names (SANs) containing wildcard prefixes and third-party hostnames:
+1. **Multiline Splitting & Wildcard Stripping:** `name_value` fields containing embedded newlines (`\n`) are split into individual SANs, lowercased, and stripped of leading `*.` fragments.
+2. **Immediate Boundary Validation:** Every discovered hostname candidate is converted to a canonical HTTPS URL (`https://<hostname>/`) and evaluated via `ScopeEnforcer::validate_url()`.
+3. **Fail-Closed Filtering:** Any hostname matching `excluded_domains`, `excluded_paths`, or falling outside the configured `allowed_domains` is immediately discarded before database persistence or network probing.
+
+### 13.3 Network Resiliency & Graceful Degradation
+
+Public Certificate Transparency logs (specifically `crt.sh`) frequently encounter heavy traffic, rate limits (`HTTP 429`), server unavailability (`HTTP 503`), or network latency spikes:
+- `CtLogDiscoverer` uses a polite `User-Agent` incorporating the configured `researcher_handle` attribution header.
+- Transient HTTP 429, 503, connection timeouts, or malformed JSON responses are treated non-fatally. The discoverer logs a diagnostic `[WARN]` to `stderr` and returns an empty list cleanly without crashing or aborting the broader scan workflow.
+
+### 13.4 CLI, Diff, Reporting & MCP Integration
+
+- **CLI Subcommand:** `bountyscope ct --config <path> [--json] [--db <path>]` provides standalone passive subdomain enumeration without crawling or probing.
+- **Scan & Map Integration:** Flag `--enable-ct` / `--ct-logs` activates CT log querying in `SurfaceMapper::map`, seeding in-scope subdomains into the discovery queue under `discovered_via = "ct_log"`.
+- **Snapshot Persistence & Diff:** Discovered subdomains are stored in SQLite (`endpoints` table and `scan_snapshot_items` with `item_type = 'subdomain'`). Differential analysis detects `new_subdomains` and `removed_subdomains` across historical scan runs.
+- **Reports:** Markdown assessment reports include `## Discovered Subdomains`; diff reports display `## Subdomains & Hostname Changes`. JSON reports and diffs output `subdomains`, `new_subdomains`, and `removed_subdomains`.
+- **MCP Tool:** `list_discovered_subdomains` tool enables external agents to query in-scope subdomains with optional `source` filtering, complete with standard `ToolAnnotations` hints (`read_only_hint: true`, `destructive_hint: false`, `idempotent_hint: true`, `open_world_hint: false`).
+
 
 

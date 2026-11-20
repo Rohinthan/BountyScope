@@ -92,6 +92,9 @@ pub enum MapperError {
 
     #[error("Regex compilation error: {0}")]
     Regex(#[from] regex::Error),
+
+    #[error("Certificate Transparency discovery error: {0}")]
+    Ct(#[from] CtError),
 }
 
 /// Structured errors for verification runner operations.
@@ -146,4 +149,23 @@ pub enum McpError {
 
     #[error("MCP protocol or transport error: {0}")]
     Protocol(String),
+}
+
+/// Structured errors for Certificate Transparency discovery operations.
+#[derive(Debug, Error)]
+pub enum CtError {
+    #[error("Network error during CT log discovery: {0}")]
+    Network(String),
+
+    #[error("Rate limited by CT log provider (HTTP {0})")]
+    RateLimited(u16),
+
+    #[error("CT log service unavailable (HTTP {0})")]
+    ServiceUnavailable(u16),
+
+    #[error("JSON parsing error from CT log response: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("Scope error during CT discovery: {0}")]
+    Scope(#[from] ScopeError),
 }

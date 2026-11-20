@@ -122,6 +122,22 @@ pub struct ListDetectedTechnologiesRequest {
     pub category: Option<String>,
 }
 
+/// Parameter schema for the `list_discovered_subdomains` tool.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ListDiscoveredSubdomainsRequest {
+    /// Optional discovery source filter (e.g. ct_log, js_subdomain, sitemap_xml).
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+/// Subdomain summary returned by the `list_discovered_subdomains` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SubdomainSummary {
+    pub hostname: String,
+    pub source: String,
+    pub url: String,
+}
+
 /// Native Model Context Protocol (MCP) server for BountyScope.
 ///
 /// Exposes read-only and scope-verification tools over JSON-RPC 2.0 to authorized MCP clients:
@@ -132,6 +148,7 @@ pub struct ListDetectedTechnologiesRequest {
 /// - `diff_latest_scans`: Computes regressions and attack surface differences between historical scan runs.
 /// - `validate_scope`: Validates scope configuration syntax and safety constraints.
 /// - `list_detected_technologies`: Queries passively detected technologies, frameworks, and WAF/CDN infrastructure.
+/// - `list_discovered_subdomains`: Queries discovered in-scope subdomains for the active program.
 #[derive(Clone)]
 pub struct BountyScopeMcpServer {
     enforcer: ScopeEnforcer,
@@ -143,7 +160,7 @@ pub struct BountyScopeMcpServer {
 impl ServerHandler for BountyScopeMcpServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("bountyscope", "0.16.2"))
+            .with_server_info(Implementation::new("bountyscope", "0.16.3"))
             .with_instructions(
                 "BountyScope Model Context Protocol server exposing scope validation, mapped endpoints, security findings, assessment reports, and historical regression diffs.",
             )
@@ -353,6 +370,8 @@ impl BountyScopeMcpServer {
                     "resolved_findings": diff.resolved_findings,
                     "new_technologies": diff.new_technologies,
                     "removed_technologies": diff.removed_technologies,
+                    "new_subdomains": diff.new_subdomains,
+                    "removed_subdomains": diff.removed_subdomains,
                     "markdown_report": markdown_report,
                 }))
             }
@@ -411,6 +430,37 @@ impl BountyScopeMcpServer {
                 let count = technologies.len();
                 CallToolResult::structured(serde_json::json!({
                     "technologies": technologies,
+                    "count": count,
+                }))
+            }
+            Err(err) => CallToolResult::structured_error(serde_json::json!({
+                "error": "DatabaseQueryError",
+                "message": err.to_string(),
+            })),
+        }
+    }
+
+    /// Queries discovered in-scope subdomains for the active program from storage, optionally filtered by discovery source.
+    #[tool(
+        name = "list_discovered_subdomains",
+        description = "Queries discovered in-scope subdomains for the active program from storage, optionally filtered by discovery source.",
+        annotations(
+            title = "List Discovered Subdomains",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    pub async fn list_discovered_subdomains(
+        &self,
+        Parameters(params): Parameters<ListDiscoveredSubdomainsRequest>,
+    ) -> CallToolResult {
+        match self.query_subdomains(params.source.as_deref()) {
+            Ok(subdomains) => {
+                let count = subdomains.len();
+                CallToolResult::structured(serde_json::json!({
+                    "subdomains": subdomains,
                     "count": count,
                 }))
             }
@@ -623,6 +673,38 @@ impl BountyScopeMcpServer {
         Ok(technologies)
     }
 
+    /// Queries stored discovered subdomains for the configured program, optionally filtered by discovery source.
+    pub fn query_subdomains(
+        &self,
+        source_filter: Option<&str>,
+    ) -> Result<Vec<SubdomainSummary>, McpError> {
+        let program_name = &self.enforcer.config().program_name;
+        let program = self
+            .storage
+            .get_program_by_name(program_name)
+            .map_err(McpError::Storage)?;
+
+        let mut subdomains = self
+            .storage
+            .get_subdomains_for_program(&program.id)
+            .map_err(McpError::Storage)?;
+
+        if let Some(src) = source_filter {
+            subdomains.retain(|s| s.source.eq_ignore_ascii_case(src));
+        }
+
+        let summaries: Vec<SubdomainSummary> = subdomains
+            .into_iter()
+            .map(|s| SubdomainSummary {
+                hostname: s.hostname,
+                source: s.source,
+                url: s.url,
+            })
+            .collect();
+
+        Ok(summaries)
+    }
+
     /// Renders the complete Markdown report for the active program.
     pub fn render_report(&self) -> Result<String, McpError> {
         let program_name = &self.enforcer.config().program_name;
@@ -646,12 +728,18 @@ impl BountyScopeMcpServer {
             .get_detected_technologies_for_program(&program.id)
             .map_err(McpError::Storage)?;
 
+        let subdomains = self
+            .storage
+            .get_subdomains_for_program(&program.id)
+            .map_err(McpError::Storage)?;
+
         let report_md = ReportGenerator::generate_markdown(
             &program,
             self.enforcer.config(),
             &endpoints,
             &findings,
             &technologies,
+            &subdomains,
         );
 
         Ok(report_md)
@@ -940,7 +1028,16 @@ mod tests {
         assert_eq!(val_tech1["count"], 1);
         assert_eq!(val_tech1["technologies"][0]["name"], "Cloudflare");
 
-        // 6. diff_latest_scans (fewer than 2 runs returns structured error)
+        // 6. list_discovered_subdomains
+        let res_sub0 = server
+            .list_discovered_subdomains(Parameters(ListDiscoveredSubdomainsRequest::default()))
+            .await;
+        assert_eq!(res_sub0.is_error, Some(false));
+        let val_sub0 = res_sub0.structured_content.expect("structured content");
+        assert_eq!(val_sub0["count"], 1);
+        assert_eq!(val_sub0["subdomains"][0]["hostname"], "example.com");
+
+        // 7. diff_latest_scans (fewer than 2 runs returns structured error)
         let res5_err = server
             .diff_latest_scans(Parameters(DiffLatestScansRequest::default()))
             .await;
@@ -1054,6 +1151,7 @@ safe_mode: true
             "diff_latest_scans",
             "validate_scope",
             "list_detected_technologies",
+            "list_discovered_subdomains",
         ];
 
         for tool_name in &expected_tools {

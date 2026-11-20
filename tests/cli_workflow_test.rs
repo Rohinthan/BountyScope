@@ -376,9 +376,9 @@ researcher_handle: "format-tester"
     let json_val: serde_json::Value =
         serde_json::from_str(&json_stdout).expect("valid JSON stdout expected");
 
-    assert_eq!(json_val["schema_version"], "0.16.2");
+    assert_eq!(json_val["schema_version"], "0.16.3");
     assert_eq!(json_val["tool"]["name"], "BountyScope");
-    assert_eq!(json_val["tool"]["version"], "0.16.2");
+    assert_eq!(json_val["tool"]["version"], "0.16.3");
     assert_eq!(json_val["program"]["name"], "cli-multiformat-test");
     assert_eq!(json_val["program"]["researcher_handle"], "format-tester");
     assert!(!json_val["endpoints"]
@@ -386,6 +386,7 @@ researcher_handle: "format-tester"
         .expect("endpoints")
         .is_empty());
     assert!(json_val["detected_technologies"].is_array());
+    assert!(json_val["subdomains"].is_array());
 
     // 3. Report --format sarif --stdout
     let sarif_rep_out = Command::new(bin_path)
@@ -414,7 +415,7 @@ researcher_handle: "format-tester"
         sarif_val["runs"][0]["tool"]["driver"]["name"],
         "BountyScope"
     );
-    assert_eq!(sarif_val["runs"][0]["tool"]["driver"]["version"], "0.16.2");
+    assert_eq!(sarif_val["runs"][0]["tool"]["driver"]["version"], "0.16.3");
     assert!(sarif_val["runs"][0]["tool"]["driver"]["rules"].is_array());
     assert!(sarif_val["runs"][0]["results"].is_array());
 
@@ -449,9 +450,9 @@ researcher_handle: "format-tester"
     let diff_val: serde_json::Value =
         serde_json::from_str(&diff_stdout).expect("valid JSON diff expected");
 
-    assert_eq!(diff_val["schema_version"], "0.16.2");
+    assert_eq!(diff_val["schema_version"], "0.16.3");
     assert_eq!(diff_val["tool"]["name"], "BountyScope");
-    assert_eq!(diff_val["tool"]["version"], "0.16.2");
+    assert_eq!(diff_val["tool"]["version"], "0.16.3");
     assert_eq!(diff_val["program_name"], "cli-multiformat-test");
     assert!(diff_val["metrics"].is_object());
 
@@ -579,4 +580,39 @@ safe_mode: true
         .as_array()
         .expect("errors array")
         .is_empty());
+}
+
+#[test]
+fn test_cli_ct_subcommand_offline_json() {
+    let temp = tempdir().expect("tempdir failed");
+    let config_path = temp.path().join("scope.yaml");
+    std::fs::write(
+        &config_path,
+        r#"
+program_name: "cli-ct-test"
+platform: "local"
+allowed_domains:
+  - "127.0.0.1"
+  - "localhost"
+rate_limit_rps: 10
+safe_mode: true
+"#,
+    )
+    .expect("write scope.yaml");
+
+    let bin_path = env!("CARGO_BIN_EXE_bountyscope");
+    let ct_out = Command::new(bin_path)
+        .arg("ct")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--json")
+        .output()
+        .expect("bountyscope ct failed");
+
+    assert!(ct_out.status.success());
+    let stdout = String::from_utf8_lossy(&ct_out.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON stdout");
+    assert_eq!(val["program"], "cli-ct-test");
+    assert_eq!(val["total_discovered"], 0);
+    assert_eq!(val["subdomains"].as_array().expect("subdomains").len(), 0);
 }

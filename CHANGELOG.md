@@ -5,6 +5,31 @@ All notable changes to BountyScope will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.3] - 2026-11-20
+
+### Added
+- **Scope-Locked Passive Subdomain Discovery via Certificate Transparency (`src/ct/`):**
+  - Implemented `CtLogDiscoverer` querying public Certificate Transparency logs (`https://crt.sh/?q=%.<domain>&output=json`) for eligible registered base domains in `ScopeConfig::allowed_domains`.
+  - Parses multiline SAN `name_value` entries and `common_name`, normalizes hostnames (lowercase, strips wildcard `*.` prefixes).
+  - Enforces strict boundary verification: runs every candidate subdomain through `ScopeEnforcer::validate_url()`, immediately discarding out-of-scope or explicitly excluded subdomains at zero network cost.
+  - Resilient network handling: gracefully catches rate limits (`429`), server unavailability (`503`), network timeouts, and JSON parse errors with polite `[WARN]` diagnostics without crashing or aborting scans.
+  - Automatically filters base domains, skipping IP addresses, loopback hosts, public suffix / TLD-only entries, and wildcard fragments.
+- **CLI Subcommand & Scan Pipeline Integration:**
+  - Added standalone `bountyscope ct --config <path> [--json] [--db <path>]` command for dedicated subdomain discovery.
+  - Added `--enable-ct` / `--ct-logs` flag to `bountyscope scan` and `bountyscope map` (defaulting to `false`).
+  - Automatically seeds discovered subdomains into `SurfaceMapper` endpoint queue with `discovered_via = "ct_log"`.
+- **Snapshot Persistence & Regression Monitoring (`bountyscope diff`):**
+  - Recorded subdomain snapshot items (`item_type = 'subdomain'`, `source = "ct_log"`) in `scan_snapshot_items`.
+  - Added `new_subdomains` and `removed_subdomains` tracking to `compute_diff_between_runs` and `ScanDiff`.
+  - Rendered subdomain changes in console output, Markdown reports (`## Subdomains & Hostname Changes`), and structured JSON diff reports (`new_subdomains`, `removed_subdomains`, and quantitative delta metrics).
+- **Multi-Format Assessment Reporting:**
+  - Added `## Discovered Subdomains` table in Markdown assessment reports.
+  - Added `subdomains` array in structured JSON reports (`ReportFormat::Json`).
+- **Model Context Protocol (MCP) `list_discovered_subdomains` Tool:**
+  - Added `list_discovered_subdomains` tool to `BountyScopeMcpServer` with optional `source` filtering.
+  - Configured explicit `ToolAnnotations`: `read_only_hint: true`, `destructive_hint: false`, `idempotent_hint: true`, and `open_world_hint: false`.
+  - Updated `diff_latest_scans` MCP tool output to include `new_subdomains` and `removed_subdomains`.
+
 ## [0.16.2] - 2026-11-20
 
 ### Added

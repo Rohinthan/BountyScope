@@ -2,8 +2,8 @@ use crate::error::ReportError;
 use crate::fingerprint::DetectedTechnology;
 use crate::scope::ScopeConfig;
 use crate::storage::{
-    DiffFindingItem, DiffTechItem, EndpointRecord, EndpointStatusChange, FindingRecord,
-    ProgramRecord, ScanDiff, ScanRunRecord,
+    DiffFindingItem, DiffSubdomainItem, DiffTechItem, DiscoveredSubdomainRecord, EndpointRecord,
+    EndpointStatusChange, FindingRecord, ProgramRecord, ScanDiff, ScanRunRecord,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -54,6 +54,15 @@ pub struct JsonReport {
     pub endpoints: Vec<JsonEndpointItem>,
     pub findings: Vec<JsonFindingItem>,
     pub detected_technologies: Vec<DetectedTechnology>,
+    pub subdomains: Vec<JsonSubdomainItem>,
+}
+
+/// Subdomain record serialized in structured JSON assessment reports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonSubdomainItem {
+    pub hostname: String,
+    pub source: String,
+    pub url: String,
 }
 
 /// Metadata identifying the executing tool.
@@ -136,6 +145,8 @@ pub struct JsonDiffReport {
     pub resolved_findings: Vec<DiffFindingItem>,
     pub new_technologies: Vec<DiffTechItem>,
     pub removed_technologies: Vec<DiffTechItem>,
+    pub new_subdomains: Vec<DiffSubdomainItem>,
+    pub removed_subdomains: Vec<DiffSubdomainItem>,
 }
 
 /// Quantitative delta metrics between two scan runs.
@@ -150,6 +161,8 @@ pub struct JsonDiffMetrics {
     pub resolved_findings_count: usize,
     pub new_technologies_count: usize,
     pub removed_technologies_count: usize,
+    pub new_subdomains_count: usize,
+    pub removed_subdomains_count: usize,
 }
 
 /// OASIS SARIF v2.1.0 document schema.
@@ -275,6 +288,7 @@ impl ReportGenerator {
         endpoints: &[EndpointRecord],
         findings: &[FindingRecord],
         technologies: &[DetectedTechnology],
+        subdomains: &[DiscoveredSubdomainRecord],
     ) -> String {
         let mut doc = String::new();
 
@@ -295,6 +309,10 @@ impl ReportGenerator {
         doc.push_str(&format!(
             "- **Total Endpoints Audited:** {}\n",
             endpoints.len()
+        ));
+        doc.push_str(&format!(
+            "- **Total Subdomains Discovered:** {}\n",
+            subdomains.len()
         ));
         doc.push_str(&format!(
             "- **Total Security Findings:** {}\n",
@@ -413,7 +431,23 @@ impl ReportGenerator {
             doc.push('\n');
         }
 
-        // 5. Passively Detected Technology Stack
+        // 5. Discovered Subdomains
+        doc.push_str("## Discovered Subdomains\n\n");
+        if subdomains.is_empty() {
+            doc.push_str("_No subdomains discovered._\n\n");
+        } else {
+            doc.push_str("| Hostname | Discovered Via | Entry URL |\n");
+            doc.push_str("| :--- | :--- | :--- |\n");
+            for sub in subdomains {
+                doc.push_str(&format!(
+                    "| `{}` | `{}` | `{}` |\n",
+                    sub.hostname, sub.source, sub.url
+                ));
+            }
+            doc.push('\n');
+        }
+
+        // 6. Passively Detected Technology Stack
         doc.push_str("## Detected Technology Stack\n\n");
         if technologies.is_empty() {
             doc.push_str("_No technology or WAF/CDN components were identified._\n\n");
@@ -432,7 +466,7 @@ impl ReportGenerator {
             doc.push('\n');
         }
 
-        // 6. Detailed Findings Sections
+        // 7. Detailed Findings Sections
         doc.push_str("## Detailed Security Findings\n\n");
         if findings.is_empty() {
             doc.push_str("_No policy violations or configuration weaknesses were identified._\n");
@@ -546,6 +580,14 @@ impl ReportGenerator {
         doc.push_str(&format!(
             "| **Removed Endpoints** | - | - | -{} |\n",
             diff.removed_endpoints.len()
+        ));
+        doc.push_str(&format!(
+            "| **New Subdomains** | - | - | +{} |\n",
+            diff.new_subdomains.len()
+        ));
+        doc.push_str(&format!(
+            "| **Removed Subdomains** | - | - | -{} |\n",
+            diff.removed_subdomains.len()
         ));
         doc.push_str(&format!(
             "| **Status Transitions** | - | - | {} |\n",
@@ -692,6 +734,37 @@ impl ReportGenerator {
             }
         }
 
+        // 8. Subdomains & Hostname Changes
+        let sub_changes_count = diff.new_subdomains.len() + diff.removed_subdomains.len();
+        doc.push_str(&format!(
+            "## Subdomains & Hostname Changes ({})\n\n",
+            sub_changes_count
+        ));
+        if sub_changes_count == 0 {
+            doc.push_str("_No subdomain additions or removals detected._\n\n");
+        } else {
+            if !diff.new_subdomains.is_empty() {
+                doc.push_str("### Newly Discovered Subdomains\n\n");
+                for sub in &diff.new_subdomains {
+                    doc.push_str(&format!(
+                        "- `+ [{}] {}` (`{}`)\n",
+                        sub.source, sub.hostname, sub.url
+                    ));
+                }
+                doc.push('\n');
+            }
+            if !diff.removed_subdomains.is_empty() {
+                doc.push_str("### Removed Subdomains\n\n");
+                for sub in &diff.removed_subdomains {
+                    doc.push_str(&format!(
+                        "- `- [{}] {}` (`{}`)\n",
+                        sub.source, sub.hostname, sub.url
+                    ));
+                }
+                doc.push('\n');
+            }
+        }
+
         doc
     }
 
@@ -702,6 +775,7 @@ impl ReportGenerator {
         endpoints: &[EndpointRecord],
         findings: &[FindingRecord],
         technologies: &[DetectedTechnology],
+        subdomains: &[DiscoveredSubdomainRecord],
     ) -> Result<String, ReportError> {
         let mut critical_count = 0;
         let mut high_count = 0;
@@ -757,11 +831,20 @@ impl ReportGenerator {
             })
             .collect();
 
+        let json_subdomains: Vec<JsonSubdomainItem> = subdomains
+            .iter()
+            .map(|s| JsonSubdomainItem {
+                hostname: s.hostname.clone(),
+                source: s.source.clone(),
+                url: s.url.clone(),
+            })
+            .collect();
+
         let report = JsonReport {
-            schema_version: "0.16.2".to_string(),
+            schema_version: "0.16.3".to_string(),
             tool: JsonToolMetadata {
                 name: "BountyScope".to_string(),
-                version: "0.16.2".to_string(),
+                version: "0.16.3".to_string(),
             },
             program: JsonProgramMetadata {
                 name: program.name.clone(),
@@ -785,6 +868,7 @@ impl ReportGenerator {
             endpoints: json_endpoints,
             findings: json_findings,
             detected_technologies: technologies.to_vec(),
+            subdomains: json_subdomains,
         };
 
         serde_json::to_string_pretty(&report).map_err(ReportError::from)
@@ -865,7 +949,7 @@ impl ReportGenerator {
                 tool: SarifTool {
                     driver: SarifDriver {
                         name: "BountyScope".to_string(),
-                        version: "0.16.2".to_string(),
+                        version: "0.16.3".to_string(),
                         information_uri: "https://github.com/Rohinthan/BountyScope".to_string(),
                         rules: rules_map.into_values().collect(),
                     },
@@ -885,10 +969,10 @@ impl ReportGenerator {
             diff.current_run.findings_count as i64 - diff.baseline_run.findings_count as i64;
 
         let diff_report = JsonDiffReport {
-            schema_version: "0.16.2".to_string(),
+            schema_version: "0.16.3".to_string(),
             tool: JsonToolMetadata {
                 name: "BountyScope".to_string(),
-                version: "0.16.2".to_string(),
+                version: "0.16.3".to_string(),
             },
             program_name: diff.program_name.clone(),
             baseline_run: diff.baseline_run.clone(),
@@ -903,6 +987,8 @@ impl ReportGenerator {
                 resolved_findings_count: diff.resolved_findings.len(),
                 new_technologies_count: diff.new_technologies.len(),
                 removed_technologies_count: diff.removed_technologies.len(),
+                new_subdomains_count: diff.new_subdomains.len(),
+                removed_subdomains_count: diff.removed_subdomains.len(),
             },
             new_endpoints: diff.new_endpoints.clone(),
             removed_endpoints: diff.removed_endpoints.clone(),
@@ -911,6 +997,8 @@ impl ReportGenerator {
             resolved_findings: diff.resolved_findings.clone(),
             new_technologies: diff.new_technologies.clone(),
             removed_technologies: diff.removed_technologies.clone(),
+            new_subdomains: diff.new_subdomains.clone(),
+            removed_subdomains: diff.removed_subdomains.clone(),
         };
 
         serde_json::to_string_pretty(&diff_report).map_err(ReportError::from)
@@ -924,6 +1012,7 @@ impl ReportGenerator {
         endpoints: &[EndpointRecord],
         findings: &[FindingRecord],
         technologies: &[DetectedTechnology],
+        subdomains: &[DiscoveredSubdomainRecord],
     ) -> Result<String, ReportError> {
         match format {
             ReportFormat::Md => Ok(Self::generate_markdown(
@@ -932,10 +1021,16 @@ impl ReportGenerator {
                 endpoints,
                 findings,
                 technologies,
+                subdomains,
             )),
-            ReportFormat::Json => {
-                Self::render_json_report(program, config, endpoints, findings, technologies)
-            }
+            ReportFormat::Json => Self::render_json_report(
+                program,
+                config,
+                endpoints,
+                findings,
+                technologies,
+                subdomains,
+            ),
             ReportFormat::Sarif => Self::render_sarif_report(program, config, endpoints, findings),
         }
     }
@@ -1020,8 +1115,20 @@ mod tests {
             endpoint: "http://127.0.0.1:8080/api/v1/auth".to_string(),
         }];
 
-        let md =
-            ReportGenerator::generate_markdown(&program, &config, &endpoints, &findings, &techs);
+        let subdomains = vec![DiscoveredSubdomainRecord {
+            hostname: "api.example.com".to_string(),
+            source: "ct_log".to_string(),
+            url: "https://api.example.com/".to_string(),
+        }];
+
+        let md = ReportGenerator::generate_markdown(
+            &program,
+            &config,
+            &endpoints,
+            &findings,
+            &techs,
+            &subdomains,
+        );
 
         assert!(md.contains("# Security Assessment Report: report-test-app"));
         assert!(md.contains("**HIGH** | 1"));
@@ -1034,6 +1141,9 @@ mod tests {
         assert!(md.contains("## Detected Technology Stack"));
         assert!(md.contains("Cloudflare"));
         assert!(md.contains("WafCdn"));
+        assert!(md.contains("## Discovered Subdomains"));
+        assert!(md.contains("api.example.com"));
+        assert!(md.contains("ct_log"));
     }
 
     #[test]
@@ -1090,6 +1200,12 @@ mod tests {
                 version: Some("1.18.0".to_string()),
                 evidence: "Server: nginx/1.18.0".to_string(),
             }],
+            new_subdomains: vec![DiffSubdomainItem {
+                hostname: "new-api.example.com".to_string(),
+                source: "ct_log".to_string(),
+                url: "https://new-api.example.com/".to_string(),
+            }],
+            removed_subdomains: vec![],
         };
 
         let md = ReportGenerator::generate_diff_markdown(&diff);
@@ -1107,6 +1223,8 @@ mod tests {
         assert!(md.contains("## Technologies & Infrastructure Changes"));
         assert!(md.contains("Cloudflare"));
         assert!(md.contains("Nginx"));
+        assert!(md.contains("## Subdomains & Hostname Changes"));
+        assert!(md.contains("new-api.example.com"));
     }
 
     #[test]
@@ -1172,16 +1290,28 @@ mod tests {
             endpoint: "http://127.0.0.1:8080/api/v1/users".to_string(),
         }];
 
+        let subdomains = vec![DiscoveredSubdomainRecord {
+            hostname: "json-sub.example.com".to_string(),
+            source: "ct_log".to_string(),
+            url: "https://json-sub.example.com/".to_string(),
+        }];
+
         // Test JSON report rendering
-        let json_str =
-            ReportGenerator::render_json_report(&program, &config, &endpoints, &findings, &techs)
-                .expect("render json report failed");
+        let json_str = ReportGenerator::render_json_report(
+            &program,
+            &config,
+            &endpoints,
+            &findings,
+            &techs,
+            &subdomains,
+        )
+        .expect("render json report failed");
 
         let val: serde_json::Value = serde_json::from_str(&json_str).expect("valid JSON expected");
 
-        assert_eq!(val["schema_version"], "0.16.2");
+        assert_eq!(val["schema_version"], "0.16.3");
         assert_eq!(val["tool"]["name"], "BountyScope");
-        assert_eq!(val["tool"]["version"], "0.16.2");
+        assert_eq!(val["tool"]["version"], "0.16.3");
         assert_eq!(val["program"]["name"], "json-test-app");
         assert_eq!(val["program"]["researcher_handle"], "bug-hunter");
         assert_eq!(val["summary"]["endpoints_count"], 1);
@@ -1198,6 +1328,7 @@ mod tests {
         assert_eq!(val["findings"][0]["severity"], "HIGH");
         assert_eq!(val["findings"][0]["evidence"]["status"], 200);
         assert_eq!(val["detected_technologies"][0]["name"], "Nginx");
+        assert_eq!(val["subdomains"][0]["hostname"], "json-sub.example.com");
 
         // Test unified render_report with ReportFormat::Json
         let unified_json = ReportGenerator::render_report(
@@ -1207,6 +1338,7 @@ mod tests {
             &endpoints,
             &findings,
             &techs,
+            &subdomains,
         )
         .expect("render_report json failed");
         assert_eq!(unified_json, json_str);
@@ -1252,6 +1384,12 @@ mod tests {
                 evidence: "cf-ray: test".to_string(),
             }],
             removed_technologies: vec![],
+            new_subdomains: vec![DiffSubdomainItem {
+                hostname: "diff-sub.example.com".to_string(),
+                source: "ct_log".to_string(),
+                url: "https://diff-sub.example.com/".to_string(),
+            }],
+            removed_subdomains: vec![],
         };
 
         let diff_json_str =
@@ -1260,16 +1398,21 @@ mod tests {
         let diff_val: serde_json::Value =
             serde_json::from_str(&diff_json_str).expect("valid JSON diff expected");
 
-        assert_eq!(diff_val["schema_version"], "0.16.2");
+        assert_eq!(diff_val["schema_version"], "0.16.3");
         assert_eq!(diff_val["program_name"], "json-test-app");
         assert_eq!(diff_val["metrics"]["total_endpoints_delta"], 1);
         assert_eq!(diff_val["metrics"]["new_findings_count"], 1);
         assert_eq!(diff_val["metrics"]["new_technologies_count"], 1);
+        assert_eq!(diff_val["metrics"]["new_subdomains_count"], 1);
         assert_eq!(
             diff_val["new_endpoints"][0],
             "http://127.0.0.1:8080/api/v2/new"
         );
         assert_eq!(diff_val["new_technologies"][0]["name"], "Cloudflare");
+        assert_eq!(
+            diff_val["new_subdomains"][0]["hostname"],
+            "diff-sub.example.com"
+        );
 
         // Test unified render_diff with ReportFormat::Json
         let unified_diff_json = ReportGenerator::render_diff(ReportFormat::Json, &diff)
@@ -1413,7 +1556,7 @@ mod tests {
 
         let driver = &val["runs"][0]["tool"]["driver"];
         assert_eq!(driver["name"], "BountyScope");
-        assert_eq!(driver["version"], "0.16.2");
+        assert_eq!(driver["version"], "0.16.3");
         assert_eq!(
             driver["informationUri"],
             "https://github.com/Rohinthan/BountyScope"

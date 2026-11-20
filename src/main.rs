@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "bountyscope")]
-#[command(version = "0.16.2")]
+#[command(version = "0.16.3")]
 #[command(
     about = "Automated vulnerability surface mapping and passive policy verification engine",
     long_about = "BountyScope is an automated vulnerability surface mapping and passive policy verification engine designed for authorized security assessments and bug bounty programs."
@@ -70,6 +70,10 @@ enum Commands {
         /// Report output format (md | json | sarif)
         #[arg(long, value_enum, default_value_t = ReportFormat::Md)]
         format: ReportFormat,
+
+        /// Enable passive Certificate Transparency log subdomain discovery via crt.sh
+        #[arg(long = "enable-ct", alias = "ct-logs", default_value_t = false)]
+        enable_ct: bool,
     },
 
     /// Safely probe an in-scope URL, enforcing rate limits and recording audit logs
@@ -106,6 +110,30 @@ enum Commands {
         /// Seed URL to initiate passive surface mapping
         #[arg(short, long)]
         url: String,
+
+        /// Path to local SQLite database file (defaults to data/<program_name>.db)
+        #[arg(short, long)]
+        db: Option<PathBuf>,
+
+        /// Enable passive Certificate Transparency log subdomain discovery via crt.sh
+        #[arg(long = "enable-ct", alias = "ct-logs", default_value_t = false)]
+        enable_ct: bool,
+    },
+
+    /// Passively discover in-scope subdomains from public Certificate Transparency logs (crt.sh)
+    Ct {
+        /// Path to scope configuration YAML file
+        #[arg(
+            short,
+            long,
+            env = "BOUNTYSCOPE_CONFIG",
+            default_value = "configs/scope.example.yaml"
+        )]
+        config: PathBuf,
+
+        /// Output discovered subdomains in structured JSON format
+        #[arg(long, default_value_t = false)]
+        json: bool,
 
         /// Path to local SQLite database file (defaults to data/<program_name>.db)
         #[arg(short, long)]
@@ -233,9 +261,16 @@ async fn main() -> Result<()> {
             db,
             output,
             format,
-        }) => execute_scan(&config, &url, &db, &output, format).await,
+            enable_ct,
+        }) => execute_scan(&config, &url, &db, &output, format, enable_ct).await,
         Some(Commands::Probe { config, url, db }) => execute_probe(&config, &url, &db).await,
-        Some(Commands::Map { config, url, db }) => execute_map(&config, &url, &db).await,
+        Some(Commands::Map {
+            config,
+            url,
+            db,
+            enable_ct,
+        }) => execute_map(&config, &url, &db, enable_ct).await,
+        Some(Commands::Ct { config, json, db }) => execute_ct(&config, json, &db).await,
         Some(Commands::Audit { config, db }) => execute_audit(&config, &db).await,
         Some(Commands::Report {
             config,
@@ -255,7 +290,7 @@ async fn main() -> Result<()> {
         }) => execute_diff(&config, &db, from, to, &output, stdout, format).await,
         Some(Commands::Mcp { config, db }) => execute_mcp(&config, &db).await,
         None => {
-            println!("BountyScope v0.16.2 - Vulnerability Surface Mapping Engine");
+            println!("BountyScope v0.16.3 - Vulnerability Surface Mapping Engine");
             println!("Run 'bountyscope --help' for available commands.");
             Ok(())
         }
@@ -469,6 +504,7 @@ async fn execute_scan(
     db_arg: &Option<PathBuf>,
     output_arg: &Option<PathBuf>,
     format: ReportFormat,
+    enable_ct: bool,
 ) -> Result<()> {
     let config = ScopeConfig::from_file(config_path)
         .with_context(|| format!("Failed to load scope configuration from {:?}", config_path))?;
@@ -503,7 +539,8 @@ async fn execute_scan(
         verified_seed.as_str()
     );
     let mapper = SurfaceMapper::new(&enforcer, &client, &storage, program_id.clone())
-        .with_context(|| "Failed to initialize surface mapper")?;
+        .with_context(|| "Failed to initialize surface mapper")?
+        .with_ct_discovery(enable_ct);
 
     let map_result = mapper.map(&verified_seed).await.with_context(|| {
         format!(
@@ -550,6 +587,10 @@ async fn execute_scan(
         .get_detected_technologies_for_program(&program.id)
         .with_context(|| "Failed to query detected technologies from database")?;
 
+    let subdomains = storage
+        .get_subdomains_for_program(&program.id)
+        .with_context(|| "Failed to query subdomains from database")?;
+
     let report_content = ReportGenerator::render_report(
         format,
         &program,
@@ -557,6 +598,7 @@ async fn execute_scan(
         &endpoints,
         &findings,
         &technologies,
+        &subdomains,
     )
     .with_context(|| "Failed to render assessment report")?;
 
@@ -628,7 +670,12 @@ async fn execute_probe(
     Ok(())
 }
 
-async fn execute_map(config_path: &PathBuf, url_str: &str, db_arg: &Option<PathBuf>) -> Result<()> {
+async fn execute_map(
+    config_path: &PathBuf,
+    url_str: &str,
+    db_arg: &Option<PathBuf>,
+    enable_ct: bool,
+) -> Result<()> {
     let config = ScopeConfig::from_file(config_path)
         .with_context(|| format!("Failed to load scope configuration from {:?}", config_path))?;
 
@@ -652,7 +699,8 @@ async fn execute_map(config_path: &PathBuf, url_str: &str, db_arg: &Option<PathB
         .with_researcher_handle(config.researcher_handle.clone());
 
     let mapper = SurfaceMapper::new(&enforcer, &client, &storage, program_id)
-        .with_context(|| "Failed to initialize surface mapper")?;
+        .with_context(|| "Failed to initialize surface mapper")?
+        .with_ct_discovery(enable_ct);
 
     let result = mapper.map(&verified_seed).await.with_context(|| {
         format!(
@@ -773,6 +821,10 @@ fn execute_report(
         .get_detected_technologies_for_program(&program.id)
         .with_context(|| "Failed to query detected technologies from database")?;
 
+    let subdomains = storage
+        .get_subdomains_for_program(&program.id)
+        .with_context(|| "Failed to query subdomains from database")?;
+
     let report_content = ReportGenerator::render_report(
         format,
         &program,
@@ -780,6 +832,7 @@ fn execute_report(
         &endpoints,
         &findings,
         &technologies,
+        &subdomains,
     )
     .with_context(|| "Failed to render assessment report")?;
 
@@ -913,9 +966,100 @@ async fn execute_diff(
                     );
                 }
             }
+            if !diff.new_subdomains.is_empty() {
+                println!(
+                    "  Newly Discovered Subdomains: {}",
+                    diff.new_subdomains.len()
+                );
+                for sub in &diff.new_subdomains {
+                    println!("    + [{}] {} ({})", sub.source, sub.hostname, sub.url);
+                }
+            }
+            if !diff.removed_subdomains.is_empty() {
+                println!(
+                    "  Removed Subdomains:          {}",
+                    diff.removed_subdomains.len()
+                );
+                for sub in &diff.removed_subdomains {
+                    println!("    - [{}] {} ({})", sub.source, sub.hostname, sub.url);
+                }
+            }
         }
         None => {
             print!("{report_content}");
+        }
+    }
+
+    Ok(())
+}
+
+async fn execute_ct(
+    config_path: &PathBuf,
+    json_output: bool,
+    db_arg: &Option<PathBuf>,
+) -> Result<()> {
+    let config = ScopeConfig::from_file(config_path)
+        .with_context(|| format!("Failed to load scope configuration from {:?}", config_path))?;
+
+    let enforcer = ScopeEnforcer::new(config.clone())
+        .with_context(|| "Scope configuration failed validation rules")?;
+
+    let db_path = resolve_db_path(db_arg, &config.program_name)?;
+    let storage = StorageEngine::open(&db_path)
+        .with_context(|| format!("Failed to initialize database at {:?}", db_path))?;
+
+    let program_id = storage
+        .upsert_program_scope(&config)
+        .with_context(|| "Failed to upsert target scope in database")?;
+
+    let discoverer = bountyscope::ct::CtLogDiscoverer::new(
+        std::time::Duration::from_secs(10),
+        config.user_agent.as_deref(),
+        config.researcher_handle.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to initialize CT discoverer: {e}"))?;
+
+    let subdomains = discoverer.discover_all_subdomains(&enforcer).await;
+
+    for sub in &subdomains {
+        let _ = storage.upsert_endpoint(&bountyscope::storage::EndpointEntry {
+            program_id: program_id.clone(),
+            url: sub.url.clone(),
+            host: sub.hostname.clone(),
+            path: "/".to_string(),
+            method: "GET".to_string(),
+            discovered_via: sub.source.clone(),
+            status_code: None,
+            response_size: None,
+            content_type: None,
+        });
+    }
+
+    if json_output {
+        let json_items: Vec<_> = subdomains
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "hostname": s.hostname,
+                    "source": s.source,
+                    "url": s.url,
+                })
+            })
+            .collect();
+        let out = serde_json::json!({
+            "program": config.program_name,
+            "total_discovered": subdomains.len(),
+            "subdomains": json_items,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        println!(
+            "Certificate Transparency Subdomain Discovery: {}",
+            config.program_name
+        );
+        println!("Discovered {} in-scope subdomain(s):", subdomains.len());
+        for s in &subdomains {
+            println!("  [{}] {} -> {}", s.source, s.hostname, s.url);
         }
     }
 
