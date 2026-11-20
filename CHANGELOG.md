@@ -5,6 +5,31 @@ All notable changes to BountyScope will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-11-20
+
+### Consolidated Minor Release
+BountyScope `v0.17.0` is the milestone release consolidating four major functional pillars introduced across incremental versions `v0.16.1` through `v0.16.4`:
+
+1. **Operator Configuration Safety Guardrails (`v0.16.1`):**
+   - Added `--strict` configuration linting to `bountyscope validate-scope` and MCP `validate_scope` tool to intercept misconfigurations before network dispatch.
+   - Enforces fail-closed validation: rejects empty or catch-all wildcards (`*`, `*.com`), restricts raw IP/CIDR ranges unless `allow_raw_ip_targets: true` is explicitly opted-in, enforces safe mode ceilings (`rate_limit_rps <= 50`, `max_depth <= 5`), and detects contradictory rules.
+   - Populated explicit MCP `ToolAnnotations` across all 8 MCP tools (`read_only_hint`, `destructive_hint`, `idempotent_hint`, `open_world_hint`).
+
+2. **Passive Tech-Stack & WAF/CDN Fingerprinting (`v0.16.2`):**
+   - Built a zero-network-I/O passive fingerprinting engine (`PassiveFingerprinter` in `src/fingerprint/mod.rs`) analyzing response headers, cookie names, and HTML markers.
+   - Categorizes technologies across 5 classes (`WafCdn`, `WebServer`, `Framework`, `Cms`, `HostingPlatform`).
+   - Surfaces detected technologies in SQLite snapshots, Markdown/JSON/SARIF reports, regression diffs (`bountyscope diff`), and MCP `list_detected_technologies`.
+
+3. **Scope-Locked Passive Certificate Transparency Discovery (`v0.16.3`):**
+   - Implemented `CtLogDiscoverer` (`src/ct/mod.rs`) querying public Certificate Transparency logs (`crt.sh`) for eligible registered base domains.
+   - Enforces compile-time `ScopeEnforcer::validate_url()` validation on every discovered hostname candidate prior to database persistence or network probing.
+   - Added standalone `bountyscope ct [--json]` command, `--enable-ct` flag to `scan` and `map`, regression tracking (`new_subdomains`, `removed_subdomains`), and MCP `list_discovered_subdomains` tool.
+
+4. **Passive JS & Source Map Secret Scanner with Mandatory Redaction (`v0.16.4`):**
+   - Implemented `SecretScanner` (`src/secrets/mod.rs`) inspecting inline scripts, external JS files, and `.js.map` source maps for 8 high-confidence token classes (AWS, Google, GitHub, Stripe, Webhooks, Private Keys, Bearer JWTs, Internal Hosts).
+   - Strict Redaction Invariant: unmasked secrets are never stored in SQLite, console outputs, or report formats (`redact_secret()` masks to `****`).
+   - Suppresses documentation placeholders and supports policy exclusions (`excluded_checks: ["secrets"]`).
+
 ## [0.16.4] - 2026-11-20
 
 ### Added

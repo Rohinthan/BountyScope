@@ -1,6 +1,6 @@
 # BountyScope Consolidated Technical Reference
 
-**Document Version:** 0.16.4  
+**Document Version:** 0.17.0  
 **Specification Level:** Final Technical Reference  
 **Applicability:** `bountyscope` CLI and Core Subsystems  
 
@@ -376,7 +376,7 @@ BountyScope features two standardized machine-readable exporters:
    - Also implemented for `bountyscope diff --format json`, rendering structured regression metrics, endpoint additions/removals, status transitions, and newly identified security issues.
 2. **OASIS SARIF v2.1.0 (`--format sarif`):**
    - Implements OASIS Static Analysis Results Interchange Format (version 2.1.0) conforming to `https://json.schemastore.org/sarif-2.1.0.json`.
-   - Driver Component: `runs[0].tool.driver` contains name `"BountyScope"`, version `"0.16.4"`, information URI, and deduplicated `rules[]` entries with title descriptions, full descriptions, and remediation guidance.
+   - Driver Component: `runs[0].tool.driver` contains name `"BountyScope"`, version `"0.17.0"`, information URI, and deduplicated `rules[]` entries with title descriptions, full descriptions, and remediation guidance.
    - Severity-to-Level Mapping:
      - `CRITICAL` / `HIGH` -> `"error"` (`security-severity: "9.0"` / `"7.0"`)
      - `MEDIUM` -> `"warning"` (`security-severity: "5.0"`)
@@ -647,9 +647,9 @@ Public Certificate Transparency logs (specifically `crt.sh`) frequently encounte
 
 ---
 
-## 14. Passive JS & Source Map Secret / Token Pattern Detection (v0.16.4)
+## 14. Passive JS & Source Map Secret / Token Pattern Detection (v0.16.4 / v0.17.0)
 
-BountyScope v0.16.4 adds passive credential and sensitive token pattern detection (`SecretScanner` in `src/secrets/mod.rs`). The engine analyzes client-accessible assets already retrieved during surface mapping (inline scripts, external `.js` scripts, `.js.map` source maps) and verification runner audits with zero additional network requests.
+BountyScope v0.16.4 and v0.17.0 feature passive credential and sensitive token pattern detection (`SecretScanner` in `src/secrets/mod.rs`). The engine analyzes client-accessible assets already retrieved during surface mapping (inline scripts, external `.js` scripts, `.js.map` source maps) and verification runner audits with zero additional network requests.
 
 ### 14.1 Detection Rules & Pattern Matrix
 
