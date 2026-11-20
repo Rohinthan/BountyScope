@@ -1,9 +1,11 @@
 use crate::error::StorageError;
+use crate::fingerprint::{DetectedTechnology, TechCategory};
 use crate::scope::ScopeConfig;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -140,6 +142,15 @@ pub struct DiffFindingItem {
     pub title: String,
 }
 
+/// Represents a technology addition or removal in a regression diff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffTechItem {
+    pub name: String,
+    pub category: String,
+    pub version: Option<String>,
+    pub evidence: String,
+}
+
 /// Consolidated differential analysis between two historical scan snapshots.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanDiff {
@@ -152,6 +163,8 @@ pub struct ScanDiff {
     pub status_changes: Vec<EndpointStatusChange>,
     pub new_findings: Vec<DiffFindingItem>,
     pub resolved_findings: Vec<DiffFindingItem>,
+    pub new_technologies: Vec<DiffTechItem>,
+    pub removed_technologies: Vec<DiffTechItem>,
 }
 
 /// Thread-safe SQLite storage engine managing assessment data and audit trails.
@@ -330,6 +343,26 @@ impl StorageEngine {
             "#;
             conn.execute_batch(migration_v2)?;
             conn.pragma_update(None, "user_version", 2)?;
+        }
+
+        if user_version < 3 {
+            let migration_v3 = r#"
+            CREATE TABLE IF NOT EXISTS detected_technologies (
+                id TEXT PRIMARY KEY,
+                program_id TEXT NOT NULL REFERENCES programs(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                category TEXT NOT NULL,
+                version TEXT,
+                evidence TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                discovered_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(program_id, name, category)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_detected_technologies_program ON detected_technologies(program_id);
+            "#;
+            conn.execute_batch(migration_v3)?;
+            conn.pragma_update(None, "user_version", 3)?;
         }
 
         Ok(())
@@ -741,6 +774,93 @@ impl StorageEngine {
         Ok(findings)
     }
 
+    /// Upserts a passively detected technology for a program.
+    /// Deduplicates on `(program_id, name, category)`, updating version and latest evidence if observed.
+    pub fn upsert_detected_technology(
+        &self,
+        program_id: &str,
+        tech: &DetectedTechnology,
+    ) -> Result<String, StorageError> {
+        let conn = self.conn.lock().map_err(|_| StorageError::LockFailure)?;
+
+        let existing: Option<(String, Option<String>)> = conn
+            .query_row(
+                "SELECT id, version FROM detected_technologies WHERE program_id = ?1 AND name = ?2 AND category = ?3",
+                params![program_id, &tech.name, tech.category.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+
+        match existing {
+            Some((id, existing_version)) => {
+                let version = tech.version.clone().or(existing_version);
+                conn.execute(
+                    r#"
+                    UPDATE detected_technologies
+                    SET version = ?1, evidence = ?2, endpoint = ?3, discovered_at = CURRENT_TIMESTAMP
+                    WHERE id = ?4
+                    "#,
+                    params![&version, &tech.evidence, &tech.endpoint, &id],
+                )?;
+                Ok(id)
+            }
+            None => {
+                let id = Uuid::new_v4().to_string();
+                conn.execute(
+                    r#"
+                    INSERT INTO detected_technologies (
+                        id, program_id, name, category, version, evidence, endpoint, discovered_at
+                    )
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP)
+                    "#,
+                    params![
+                        &id,
+                        program_id,
+                        &tech.name,
+                        tech.category.as_str(),
+                        &tech.version,
+                        &tech.evidence,
+                        &tech.endpoint,
+                    ],
+                )?;
+                Ok(id)
+            }
+        }
+    }
+
+    /// Queries all passively detected technologies for a given program, ordered by category and name.
+    pub fn get_detected_technologies_for_program(
+        &self,
+        program_id: &str,
+    ) -> Result<Vec<DetectedTechnology>, StorageError> {
+        let conn = self.conn.lock().map_err(|_| StorageError::LockFailure)?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT name, category, version, evidence, endpoint
+            FROM detected_technologies
+            WHERE program_id = ?1
+            ORDER BY category ASC, name ASC
+            "#,
+        )?;
+        let rows = stmt.query_map(params![program_id], |row| {
+            let cat_str: String = row.get(1)?;
+            let category = TechCategory::from_str(&cat_str).unwrap_or(TechCategory::Framework);
+            Ok(DetectedTechnology {
+                name: row.get(0)?,
+                category,
+                version: row.get(2)?,
+                evidence: row.get(3)?,
+                endpoint: row.get(4)?,
+            })
+        })?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
     /// Captures a complete snapshot of all mapped endpoints and findings for the given program.
     /// Returns the assigned scan run ID.
     pub fn record_scan_snapshot(&self, program_id: &str) -> Result<i64, StorageError> {
@@ -803,7 +923,33 @@ impl StorageEngine {
         };
         let findings_count = findings.len();
 
-        // 3. Create scan_runs record
+        // 3. Fetch detected technologies
+        let technologies: Vec<(String, String, Option<String>, String, String)> = {
+            let mut t_stmt = tx.prepare(
+                r#"
+                SELECT name, category, version, evidence, endpoint
+                FROM detected_technologies
+                WHERE program_id = ?1
+                ORDER BY category ASC, name ASC
+                "#,
+            )?;
+            let t_rows = t_stmt.query_map(params![program_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?;
+            let mut vec = Vec::new();
+            for r in t_rows {
+                vec.push(r?);
+            }
+            vec
+        };
+
+        // 4. Create scan_runs record
         tx.execute(
             r#"
             INSERT INTO scan_runs (program_id, endpoints_count, findings_count)
@@ -813,7 +959,7 @@ impl StorageEngine {
         )?;
         let scan_run_id = tx.last_insert_rowid();
 
-        // 4. Insert endpoint snapshot items
+        // 5. Insert endpoint snapshot items
         {
             let mut item_stmt = tx.prepare(
                 r#"
@@ -831,7 +977,7 @@ impl StorageEngine {
             }
         }
 
-        // 5. Insert finding snapshot items
+        // 6. Insert finding snapshot items
         {
             let mut item_stmt = tx.prepare(
                 r#"
@@ -842,6 +988,21 @@ impl StorageEngine {
             for (finding_type, severity, title, target_url) in &findings {
                 let item_key = format!("{finding_type}::{target_url}");
                 item_stmt.execute(params![scan_run_id, item_key, severity, title])?;
+            }
+        }
+
+        // 7. Insert technology snapshot items
+        {
+            let mut item_stmt = tx.prepare(
+                r#"
+                INSERT INTO scan_snapshot_items (scan_run_id, item_type, item_key, status_or_severity, summary)
+                VALUES (?1, 'technology', ?2, ?3, ?4)
+                "#,
+            )?;
+            for (name, category, version, evidence, _endpoint) in &technologies {
+                let item_key = format!("{category}::{name}");
+                let summary = format!("{}|{}", version.as_deref().unwrap_or(""), evidence);
+                item_stmt.execute(params![scan_run_id, item_key, category, summary])?;
             }
         }
 
@@ -967,12 +1128,15 @@ impl StorageEngine {
 
         let mut baseline_endpoints: HashMap<String, ScanSnapshotItemRecord> = HashMap::new();
         let mut baseline_findings: HashMap<String, ScanSnapshotItemRecord> = HashMap::new();
+        let mut baseline_technologies: HashMap<String, ScanSnapshotItemRecord> = HashMap::new();
         for r in baseline_rows {
             let item = r?;
             if item.item_type == "endpoint" {
                 baseline_endpoints.insert(item.item_key.clone(), item);
             } else if item.item_type == "finding" {
                 baseline_findings.insert(item.item_key.clone(), item);
+            } else if item.item_type == "technology" {
+                baseline_technologies.insert(item.item_key.clone(), item);
             }
         }
 
@@ -993,12 +1157,15 @@ impl StorageEngine {
 
         let mut current_endpoints: HashMap<String, ScanSnapshotItemRecord> = HashMap::new();
         let mut current_findings: HashMap<String, ScanSnapshotItemRecord> = HashMap::new();
+        let mut current_technologies: HashMap<String, ScanSnapshotItemRecord> = HashMap::new();
         for r in current_rows {
             let item = r?;
             if item.item_type == "endpoint" {
                 current_endpoints.insert(item.item_key.clone(), item);
             } else if item.item_type == "finding" {
                 current_findings.insert(item.item_key.clone(), item);
+            } else if item.item_type == "technology" {
+                current_technologies.insert(item.item_key.clone(), item);
             }
         }
 
@@ -1068,6 +1235,67 @@ impl StorageEngine {
         }
         Self::sort_diff_findings(&mut resolved_findings);
 
+        // Technology deltas
+        let mut new_technologies = Vec::new();
+        for (key, cur_item) in &current_technologies {
+            if !baseline_technologies.contains_key(key) {
+                let (category, name) = cur_item
+                    .item_key
+                    .split_once("::")
+                    .unwrap_or((&cur_item.status_or_severity, &cur_item.item_key));
+                let (version_str, evidence) = cur_item
+                    .summary
+                    .split_once('|')
+                    .unwrap_or(("", &cur_item.summary));
+                let version = if version_str.is_empty() {
+                    None
+                } else {
+                    Some(version_str.to_string())
+                };
+                new_technologies.push(DiffTechItem {
+                    name: name.to_string(),
+                    category: category.to_string(),
+                    version,
+                    evidence: evidence.to_string(),
+                });
+            }
+        }
+        new_technologies.sort_by(|a, b| {
+            a.category
+                .cmp(&b.category)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+
+        let mut removed_technologies = Vec::new();
+        for (key, base_item) in &baseline_technologies {
+            if !current_technologies.contains_key(key) {
+                let (category, name) = base_item
+                    .item_key
+                    .split_once("::")
+                    .unwrap_or((&base_item.status_or_severity, &base_item.item_key));
+                let (version_str, evidence) = base_item
+                    .summary
+                    .split_once('|')
+                    .unwrap_or(("", &base_item.summary));
+                let version = if version_str.is_empty() {
+                    None
+                } else {
+                    Some(version_str.to_string())
+                };
+                removed_technologies.push(DiffTechItem {
+                    name: name.to_string(),
+                    category: category.to_string(),
+                    version,
+                    evidence: evidence.to_string(),
+                });
+            }
+        }
+        removed_technologies.sort_by(|a, b| {
+            a.category
+                .cmp(&b.category)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+
         Ok(ScanDiff {
             program_id: program_id.to_string(),
             program_name,
@@ -1078,6 +1306,8 @@ impl StorageEngine {
             status_changes,
             new_findings,
             resolved_findings,
+            new_technologies,
+            removed_technologies,
         })
     }
 
@@ -1368,9 +1598,9 @@ mod tests {
     }
 
     #[test]
-    fn test_fresh_db_initializes_schema_version_2() {
+    fn test_fresh_db_initializes_schema_version_3() {
         let storage = StorageEngine::open_in_memory().expect("open_in_memory failed");
-        assert_eq!(storage.schema_version().expect("schema_version failed"), 2);
+        assert_eq!(storage.schema_version().expect("schema_version failed"), 3);
     }
 
     #[test]
@@ -1400,9 +1630,9 @@ mod tests {
             .expect("insert legacy row failed");
         }
 
-        // Open with StorageEngine and verify automatic migration to v2
+        // Open with StorageEngine and verify automatic migration to v3
         let storage = StorageEngine::open(&db_path).expect("open StorageEngine failed");
-        assert_eq!(storage.schema_version().expect("schema_version failed"), 2);
+        assert_eq!(storage.schema_version().expect("schema_version failed"), 3);
 
         let prog = storage
             .get_program_by_id("p1")
@@ -1435,7 +1665,7 @@ mod tests {
 
         {
             let storage = StorageEngine::open(&db_path).expect("first open failed");
-            assert_eq!(storage.schema_version().expect("schema_version failed"), 2);
+            assert_eq!(storage.schema_version().expect("schema_version failed"), 3);
             let config = sample_config();
             storage
                 .upsert_program_scope(&config)
@@ -1444,7 +1674,7 @@ mod tests {
 
         {
             let storage = StorageEngine::open(&db_path).expect("second open failed");
-            assert_eq!(storage.schema_version().expect("schema_version failed"), 2);
+            assert_eq!(storage.schema_version().expect("schema_version failed"), 3);
             let config = sample_config();
             let prog_id = storage
                 .upsert_program_scope(&config)
@@ -1508,9 +1738,9 @@ mod tests {
             .expect("insert endpoint failed");
         }
 
-        // Open with StorageEngine and verify automatic migration to v2
+        // Open with StorageEngine and verify automatic migration to v3
         let storage = StorageEngine::open(&db_path).expect("open StorageEngine failed");
-        assert_eq!(storage.schema_version().expect("schema_version failed"), 2);
+        assert_eq!(storage.schema_version().expect("schema_version failed"), 3);
 
         // Verify existing data is preserved
         let prog = storage
@@ -1522,6 +1752,12 @@ mod tests {
             .expect("get_endpoints failed");
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].url, "https://example.com/api");
+
+        // Verify detected_technologies table was created and can be queried
+        let techs = storage
+            .get_detected_technologies_for_program("p1")
+            .expect("get_detected_technologies failed");
+        assert_eq!(techs.len(), 0);
 
         // Verify scan snapshots can now be recorded on the migrated database
         let run_id = storage
@@ -1594,6 +1830,17 @@ mod tests {
         };
         storage.upsert_finding(&f2).expect("upsert f2 failed");
 
+        let tech1 = crate::fingerprint::DetectedTechnology {
+            name: "Nginx".to_string(),
+            category: crate::fingerprint::TechCategory::WebServer,
+            version: Some("1.18.0".to_string()),
+            evidence: "Server: nginx/1.18.0".to_string(),
+            endpoint: "https://example.com/api/v1/auth".to_string(),
+        };
+        storage
+            .upsert_detected_technology(&program_id, &tech1)
+            .expect("upsert tech1 failed");
+
         // Record Baseline Snapshot (Run 1)
         let run1_id = storage
             .record_scan_snapshot(&program_id)
@@ -1654,6 +1901,23 @@ mod tests {
         };
         storage.upsert_finding(&f3).expect("upsert f3 failed");
 
+        // 5. Shift technology: remove Nginx, add Cloudflare
+        {
+            let conn = storage.conn.lock().expect("lock failed");
+            conn.execute("DELETE FROM detected_technologies WHERE name = 'Nginx'", [])
+                .expect("delete tech1 failed");
+        }
+        let tech2 = crate::fingerprint::DetectedTechnology {
+            name: "Cloudflare".to_string(),
+            category: crate::fingerprint::TechCategory::WafCdn,
+            version: None,
+            evidence: "cf-ray: test".to_string(),
+            endpoint: "https://example.com/api/v1/new_ep".to_string(),
+        };
+        storage
+            .upsert_detected_technology(&program_id, &tech2)
+            .expect("upsert tech2 failed");
+
         // Record Current Snapshot (Run 2)
         let run2_id = storage
             .record_scan_snapshot(&program_id)
@@ -1697,5 +1961,13 @@ mod tests {
             "information_disclosure"
         );
         assert_eq!(diff.resolved_findings[0].severity, "LOW");
+
+        assert_eq!(diff.new_technologies.len(), 1);
+        assert_eq!(diff.new_technologies[0].name, "Cloudflare");
+        assert_eq!(diff.new_technologies[0].category, "WafCdn");
+
+        assert_eq!(diff.removed_technologies.len(), 1);
+        assert_eq!(diff.removed_technologies[0].name, "Nginx");
+        assert_eq!(diff.removed_technologies[0].category, "WebServer");
     }
 }

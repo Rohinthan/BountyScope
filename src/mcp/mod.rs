@@ -9,6 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::error::McpError;
+use crate::fingerprint::DetectedTechnology;
 use crate::report::ReportGenerator;
 use crate::scope::{ScopeConfig, ScopeEnforcer};
 use crate::storage::StorageEngine;
@@ -113,6 +114,14 @@ pub struct DiffLatestScansRequest {
     pub to_run_id: Option<i64>,
 }
 
+/// Parameter schema for the `list_detected_technologies` tool.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ListDetectedTechnologiesRequest {
+    /// Optional category filter (e.g. WafCdn, WebServer, Framework, Cms, HostingPlatform).
+    #[serde(default)]
+    pub category: Option<String>,
+}
+
 /// Native Model Context Protocol (MCP) server for BountyScope.
 ///
 /// Exposes read-only and scope-verification tools over JSON-RPC 2.0 to authorized MCP clients:
@@ -121,6 +130,8 @@ pub struct DiffLatestScansRequest {
 /// - `list_security_findings`: Retrieves security verification findings with severity filtering.
 /// - `generate_assessment_report`: Renders the complete Markdown assessment report.
 /// - `diff_latest_scans`: Computes regressions and attack surface differences between historical scan runs.
+/// - `validate_scope`: Validates scope configuration syntax and safety constraints.
+/// - `list_detected_technologies`: Queries passively detected technologies, frameworks, and WAF/CDN infrastructure.
 #[derive(Clone)]
 pub struct BountyScopeMcpServer {
     enforcer: ScopeEnforcer,
@@ -132,7 +143,7 @@ pub struct BountyScopeMcpServer {
 impl ServerHandler for BountyScopeMcpServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("bountyscope", "0.16.1"))
+            .with_server_info(Implementation::new("bountyscope", "0.16.2"))
             .with_instructions(
                 "BountyScope Model Context Protocol server exposing scope validation, mapped endpoints, security findings, assessment reports, and historical regression diffs.",
             )
@@ -340,6 +351,8 @@ impl BountyScopeMcpServer {
                     "status_changes": diff.status_changes,
                     "new_findings": diff.new_findings,
                     "resolved_findings": diff.resolved_findings,
+                    "new_technologies": diff.new_technologies,
+                    "removed_technologies": diff.removed_technologies,
                     "markdown_report": markdown_report,
                 }))
             }
@@ -373,6 +386,37 @@ impl BountyScopeMcpServer {
             Err(e) => CallToolResult::structured_error(serde_json::json!({
                 "error": "SerializationError",
                 "message": e.to_string(),
+            })),
+        }
+    }
+
+    /// Queries passively detected technologies, frameworks, and WAF/CDN infrastructure from storage, optionally filtered by category.
+    #[tool(
+        name = "list_detected_technologies",
+        description = "Queries passively detected technologies, frameworks, and WAF/CDN infrastructure from storage, optionally filtered by category.",
+        annotations(
+            title = "List Detected Technologies",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    pub async fn list_detected_technologies(
+        &self,
+        Parameters(params): Parameters<ListDetectedTechnologiesRequest>,
+    ) -> CallToolResult {
+        match self.query_technologies(params.category.as_deref()) {
+            Ok(technologies) => {
+                let count = technologies.len();
+                CallToolResult::structured(serde_json::json!({
+                    "technologies": technologies,
+                    "count": count,
+                }))
+            }
+            Err(err) => CallToolResult::structured_error(serde_json::json!({
+                "error": "DatabaseQueryError",
+                "message": err.to_string(),
             })),
         }
     }
@@ -534,6 +578,51 @@ impl BountyScopeMcpServer {
         Ok(summaries)
     }
 
+    /// Queries stored detected technologies for the configured program, optionally filtered by category.
+    pub fn query_technologies(
+        &self,
+        category_filter: Option<&str>,
+    ) -> Result<Vec<DetectedTechnology>, McpError> {
+        let program_name = &self.enforcer.config().program_name;
+        let program = self
+            .storage
+            .get_program_by_name(program_name)
+            .map_err(McpError::Storage)?;
+
+        let mut technologies = self
+            .storage
+            .get_detected_technologies_for_program(&program.id)
+            .map_err(McpError::Storage)?;
+
+        if let Some(filter) = category_filter {
+            technologies.retain(|t| {
+                t.category.to_string().eq_ignore_ascii_case(filter)
+                    || match t.category {
+                        crate::fingerprint::TechCategory::WafCdn => {
+                            filter.eq_ignore_ascii_case("waf")
+                                || filter.eq_ignore_ascii_case("cdn")
+                                || filter.eq_ignore_ascii_case("waf_cdn")
+                                || filter.eq_ignore_ascii_case("waf/cdn")
+                        }
+                        crate::fingerprint::TechCategory::WebServer => {
+                            filter.eq_ignore_ascii_case("server")
+                                || filter.eq_ignore_ascii_case("web_server")
+                        }
+                        crate::fingerprint::TechCategory::Framework => {
+                            filter.eq_ignore_ascii_case("framework")
+                        }
+                        crate::fingerprint::TechCategory::Cms => filter.eq_ignore_ascii_case("cms"),
+                        crate::fingerprint::TechCategory::HostingPlatform => {
+                            filter.eq_ignore_ascii_case("hosting")
+                                || filter.eq_ignore_ascii_case("hosting_platform")
+                        }
+                    }
+            });
+        }
+
+        Ok(technologies)
+    }
+
     /// Renders the complete Markdown report for the active program.
     pub fn render_report(&self) -> Result<String, McpError> {
         let program_name = &self.enforcer.config().program_name;
@@ -552,11 +641,17 @@ impl BountyScopeMcpServer {
             .get_findings_for_program(&program.id)
             .map_err(McpError::Storage)?;
 
+        let technologies = self
+            .storage
+            .get_detected_technologies_for_program(&program.id)
+            .map_err(McpError::Storage)?;
+
         let report_md = ReportGenerator::generate_markdown(
             &program,
             self.enforcer.config(),
             &endpoints,
             &findings,
+            &technologies,
         );
 
         Ok(report_md)
@@ -816,7 +911,36 @@ mod tests {
             .expect("report str")
             .contains("mcp-test-app"));
 
-        // 5. diff_latest_scans (fewer than 2 runs returns structured error)
+        // 5. list_detected_technologies
+        let res_tech0 = server
+            .list_detected_technologies(Parameters(ListDetectedTechnologiesRequest::default()))
+            .await;
+        assert_eq!(res_tech0.is_error, Some(false));
+        let val_tech0 = res_tech0.structured_content.expect("structured content");
+        assert_eq!(val_tech0["count"], 0);
+
+        let tech = DetectedTechnology {
+            name: "Cloudflare".to_string(),
+            category: crate::fingerprint::TechCategory::WafCdn,
+            version: None,
+            evidence: "cf-ray: test".to_string(),
+            endpoint: "https://example.com/api/v1/health".to_string(),
+        };
+        storage
+            .upsert_detected_technology(&program_id, &tech)
+            .expect("upsert tech failed");
+
+        let res_tech1 = server
+            .list_detected_technologies(Parameters(ListDetectedTechnologiesRequest {
+                category: Some("WafCdn".to_string()),
+            }))
+            .await;
+        assert_eq!(res_tech1.is_error, Some(false));
+        let val_tech1 = res_tech1.structured_content.expect("structured content");
+        assert_eq!(val_tech1["count"], 1);
+        assert_eq!(val_tech1["technologies"][0]["name"], "Cloudflare");
+
+        // 6. diff_latest_scans (fewer than 2 runs returns structured error)
         let res5_err = server
             .diff_latest_scans(Parameters(DiffLatestScansRequest::default()))
             .await;
@@ -929,6 +1053,7 @@ safe_mode: true
             "generate_assessment_report",
             "diff_latest_scans",
             "validate_scope",
+            "list_detected_technologies",
         ];
 
         for tool_name in &expected_tools {

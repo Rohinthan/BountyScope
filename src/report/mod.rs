@@ -1,8 +1,9 @@
 use crate::error::ReportError;
+use crate::fingerprint::DetectedTechnology;
 use crate::scope::ScopeConfig;
 use crate::storage::{
-    DiffFindingItem, EndpointRecord, EndpointStatusChange, FindingRecord, ProgramRecord, ScanDiff,
-    ScanRunRecord,
+    DiffFindingItem, DiffTechItem, EndpointRecord, EndpointStatusChange, FindingRecord,
+    ProgramRecord, ScanDiff, ScanRunRecord,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -52,6 +53,7 @@ pub struct JsonReport {
     pub summary: JsonReportSummary,
     pub endpoints: Vec<JsonEndpointItem>,
     pub findings: Vec<JsonFindingItem>,
+    pub detected_technologies: Vec<DetectedTechnology>,
 }
 
 /// Metadata identifying the executing tool.
@@ -132,6 +134,8 @@ pub struct JsonDiffReport {
     pub status_changes: Vec<EndpointStatusChange>,
     pub new_findings: Vec<DiffFindingItem>,
     pub resolved_findings: Vec<DiffFindingItem>,
+    pub new_technologies: Vec<DiffTechItem>,
+    pub removed_technologies: Vec<DiffTechItem>,
 }
 
 /// Quantitative delta metrics between two scan runs.
@@ -144,6 +148,8 @@ pub struct JsonDiffMetrics {
     pub status_changes_count: usize,
     pub new_findings_count: usize,
     pub resolved_findings_count: usize,
+    pub new_technologies_count: usize,
+    pub removed_technologies_count: usize,
 }
 
 /// OASIS SARIF v2.1.0 document schema.
@@ -268,6 +274,7 @@ impl ReportGenerator {
         config: &ScopeConfig,
         endpoints: &[EndpointRecord],
         findings: &[FindingRecord],
+        technologies: &[DetectedTechnology],
     ) -> String {
         let mut doc = String::new();
 
@@ -406,7 +413,26 @@ impl ReportGenerator {
             doc.push('\n');
         }
 
-        // 5. Detailed Findings Sections
+        // 5. Passively Detected Technology Stack
+        doc.push_str("## Detected Technology Stack\n\n");
+        if technologies.is_empty() {
+            doc.push_str("_No technology or WAF/CDN components were identified._\n\n");
+        } else {
+            doc.push_str(
+                "| Category | Technology | Version | Triggering Evidence | Identified Endpoint |\n",
+            );
+            doc.push_str("| :--- | :--- | :--- | :--- | :--- |\n");
+            for tech in technologies {
+                let ver_str = tech.version.as_deref().unwrap_or("-");
+                doc.push_str(&format!(
+                    "| `{}` | **{}** | `{}` | `{}` | `{}` |\n",
+                    tech.category, tech.name, ver_str, tech.evidence, tech.endpoint
+                ));
+            }
+            doc.push('\n');
+        }
+
+        // 6. Detailed Findings Sections
         doc.push_str("## Detailed Security Findings\n\n");
         if findings.is_empty() {
             doc.push_str("_No policy violations or configuration weaknesses were identified._\n");
@@ -619,6 +645,53 @@ impl ReportGenerator {
             doc.push('\n');
         }
 
+        // 7. Technologies & Infrastructure Changes
+        let tech_changes_count = diff.new_technologies.len() + diff.removed_technologies.len();
+        doc.push_str(&format!(
+            "## Technologies & Infrastructure Changes ({})\n\n",
+            tech_changes_count
+        ));
+        if tech_changes_count == 0 {
+            doc.push_str("_No technology or infrastructure additions or removals detected._\n\n");
+        } else {
+            if !diff.new_technologies.is_empty() {
+                doc.push_str("### Newly Detected Technologies\n\n");
+                for tech in &diff.new_technologies {
+                    let ver = tech.version.as_deref().unwrap_or("");
+                    if ver.is_empty() {
+                        doc.push_str(&format!(
+                            "- `+ [{}] {}` (evidence: `{}`)\n",
+                            tech.category, tech.name, tech.evidence
+                        ));
+                    } else {
+                        doc.push_str(&format!(
+                            "- `+ [{}] {} v{}` (evidence: `{}`)\n",
+                            tech.category, tech.name, ver, tech.evidence
+                        ));
+                    }
+                }
+                doc.push('\n');
+            }
+            if !diff.removed_technologies.is_empty() {
+                doc.push_str("### Removed Technologies\n\n");
+                for tech in &diff.removed_technologies {
+                    let ver = tech.version.as_deref().unwrap_or("");
+                    if ver.is_empty() {
+                        doc.push_str(&format!(
+                            "- `- [{}] {}` (evidence: `{}`)\n",
+                            tech.category, tech.name, tech.evidence
+                        ));
+                    } else {
+                        doc.push_str(&format!(
+                            "- `- [{}] {} v{}` (evidence: `{}`)\n",
+                            tech.category, tech.name, ver, tech.evidence
+                        ));
+                    }
+                }
+                doc.push('\n');
+            }
+        }
+
         doc
     }
 
@@ -628,6 +701,7 @@ impl ReportGenerator {
         config: &ScopeConfig,
         endpoints: &[EndpointRecord],
         findings: &[FindingRecord],
+        technologies: &[DetectedTechnology],
     ) -> Result<String, ReportError> {
         let mut critical_count = 0;
         let mut high_count = 0;
@@ -684,10 +758,10 @@ impl ReportGenerator {
             .collect();
 
         let report = JsonReport {
-            schema_version: "0.16.1".to_string(),
+            schema_version: "0.16.2".to_string(),
             tool: JsonToolMetadata {
                 name: "BountyScope".to_string(),
-                version: "0.16.1".to_string(),
+                version: "0.16.2".to_string(),
             },
             program: JsonProgramMetadata {
                 name: program.name.clone(),
@@ -710,6 +784,7 @@ impl ReportGenerator {
             },
             endpoints: json_endpoints,
             findings: json_findings,
+            detected_technologies: technologies.to_vec(),
         };
 
         serde_json::to_string_pretty(&report).map_err(ReportError::from)
@@ -790,7 +865,7 @@ impl ReportGenerator {
                 tool: SarifTool {
                     driver: SarifDriver {
                         name: "BountyScope".to_string(),
-                        version: "0.16.1".to_string(),
+                        version: "0.16.2".to_string(),
                         information_uri: "https://github.com/Rohinthan/BountyScope".to_string(),
                         rules: rules_map.into_values().collect(),
                     },
@@ -810,10 +885,10 @@ impl ReportGenerator {
             diff.current_run.findings_count as i64 - diff.baseline_run.findings_count as i64;
 
         let diff_report = JsonDiffReport {
-            schema_version: "0.16.1".to_string(),
+            schema_version: "0.16.2".to_string(),
             tool: JsonToolMetadata {
                 name: "BountyScope".to_string(),
-                version: "0.16.1".to_string(),
+                version: "0.16.2".to_string(),
             },
             program_name: diff.program_name.clone(),
             baseline_run: diff.baseline_run.clone(),
@@ -826,12 +901,16 @@ impl ReportGenerator {
                 status_changes_count: diff.status_changes.len(),
                 new_findings_count: diff.new_findings.len(),
                 resolved_findings_count: diff.resolved_findings.len(),
+                new_technologies_count: diff.new_technologies.len(),
+                removed_technologies_count: diff.removed_technologies.len(),
             },
             new_endpoints: diff.new_endpoints.clone(),
             removed_endpoints: diff.removed_endpoints.clone(),
             status_changes: diff.status_changes.clone(),
             new_findings: diff.new_findings.clone(),
             resolved_findings: diff.resolved_findings.clone(),
+            new_technologies: diff.new_technologies.clone(),
+            removed_technologies: diff.removed_technologies.clone(),
         };
 
         serde_json::to_string_pretty(&diff_report).map_err(ReportError::from)
@@ -844,12 +923,19 @@ impl ReportGenerator {
         config: &ScopeConfig,
         endpoints: &[EndpointRecord],
         findings: &[FindingRecord],
+        technologies: &[DetectedTechnology],
     ) -> Result<String, ReportError> {
         match format {
             ReportFormat::Md => Ok(Self::generate_markdown(
-                program, config, endpoints, findings,
+                program,
+                config,
+                endpoints,
+                findings,
+                technologies,
             )),
-            ReportFormat::Json => Self::render_json_report(program, config, endpoints, findings),
+            ReportFormat::Json => {
+                Self::render_json_report(program, config, endpoints, findings, technologies)
+            }
             ReportFormat::Sarif => Self::render_sarif_report(program, config, endpoints, findings),
         }
     }
@@ -869,6 +955,7 @@ impl ReportGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fingerprint::TechCategory;
 
     #[test]
     fn test_markdown_report_formatting() {
@@ -925,7 +1012,16 @@ mod tests {
             verified_at: "2026-11-14 10:03:00".to_string(),
         }];
 
-        let md = ReportGenerator::generate_markdown(&program, &config, &endpoints, &findings);
+        let techs = vec![DetectedTechnology {
+            name: "Cloudflare".to_string(),
+            category: TechCategory::WafCdn,
+            version: None,
+            evidence: "cf-ray: test123".to_string(),
+            endpoint: "http://127.0.0.1:8080/api/v1/auth".to_string(),
+        }];
+
+        let md =
+            ReportGenerator::generate_markdown(&program, &config, &endpoints, &findings, &techs);
 
         assert!(md.contains("# Security Assessment Report: report-test-app"));
         assert!(md.contains("**HIGH** | 1"));
@@ -935,6 +1031,9 @@ mod tests {
         assert!(md.contains("https://hackerone.com/example-program/policy"));
         assert!(md.contains("security-researcher"));
         assert!(md.contains("missing_security_headers"));
+        assert!(md.contains("## Detected Technology Stack"));
+        assert!(md.contains("Cloudflare"));
+        assert!(md.contains("WafCdn"));
     }
 
     #[test]
@@ -979,6 +1078,18 @@ mod tests {
                 severity: "LOW".to_string(),
                 title: "Server header disclosure".to_string(),
             }],
+            new_technologies: vec![DiffTechItem {
+                name: "Cloudflare".to_string(),
+                category: "WafCdn".to_string(),
+                version: None,
+                evidence: "cf-ray: test".to_string(),
+            }],
+            removed_technologies: vec![DiffTechItem {
+                name: "Nginx".to_string(),
+                category: "WebServer".to_string(),
+                version: Some("1.18.0".to_string()),
+                evidence: "Server: nginx/1.18.0".to_string(),
+            }],
         };
 
         let md = ReportGenerator::generate_diff_markdown(&diff);
@@ -993,6 +1104,9 @@ mod tests {
         assert!(md.contains("`403` | `200`"));
         assert!(md.contains("CORS reflection on v2 API"));
         assert!(md.contains("Server header disclosure"));
+        assert!(md.contains("## Technologies & Infrastructure Changes"));
+        assert!(md.contains("Cloudflare"));
+        assert!(md.contains("Nginx"));
     }
 
     #[test]
@@ -1050,16 +1164,24 @@ mod tests {
             verified_at: "2026-11-15 10:03:00".to_string(),
         }];
 
+        let techs = vec![DetectedTechnology {
+            name: "Nginx".to_string(),
+            category: TechCategory::WebServer,
+            version: Some("1.21.0".to_string()),
+            evidence: "Server: nginx/1.21.0".to_string(),
+            endpoint: "http://127.0.0.1:8080/api/v1/users".to_string(),
+        }];
+
         // Test JSON report rendering
         let json_str =
-            ReportGenerator::render_json_report(&program, &config, &endpoints, &findings)
+            ReportGenerator::render_json_report(&program, &config, &endpoints, &findings, &techs)
                 .expect("render json report failed");
 
         let val: serde_json::Value = serde_json::from_str(&json_str).expect("valid JSON expected");
 
-        assert_eq!(val["schema_version"], "0.16.1");
+        assert_eq!(val["schema_version"], "0.16.2");
         assert_eq!(val["tool"]["name"], "BountyScope");
-        assert_eq!(val["tool"]["version"], "0.16.1");
+        assert_eq!(val["tool"]["version"], "0.16.2");
         assert_eq!(val["program"]["name"], "json-test-app");
         assert_eq!(val["program"]["researcher_handle"], "bug-hunter");
         assert_eq!(val["summary"]["endpoints_count"], 1);
@@ -1075,6 +1197,7 @@ mod tests {
         );
         assert_eq!(val["findings"][0]["severity"], "HIGH");
         assert_eq!(val["findings"][0]["evidence"]["status"], 200);
+        assert_eq!(val["detected_technologies"][0]["name"], "Nginx");
 
         // Test unified render_report with ReportFormat::Json
         let unified_json = ReportGenerator::render_report(
@@ -1083,6 +1206,7 @@ mod tests {
             &config,
             &endpoints,
             &findings,
+            &techs,
         )
         .expect("render_report json failed");
         assert_eq!(unified_json, json_str);
@@ -1121,6 +1245,13 @@ mod tests {
                 title: "CORS on new API".to_string(),
             }],
             resolved_findings: vec![],
+            new_technologies: vec![DiffTechItem {
+                name: "Cloudflare".to_string(),
+                category: "WafCdn".to_string(),
+                version: None,
+                evidence: "cf-ray: test".to_string(),
+            }],
+            removed_technologies: vec![],
         };
 
         let diff_json_str =
@@ -1129,14 +1260,16 @@ mod tests {
         let diff_val: serde_json::Value =
             serde_json::from_str(&diff_json_str).expect("valid JSON diff expected");
 
-        assert_eq!(diff_val["schema_version"], "0.16.1");
+        assert_eq!(diff_val["schema_version"], "0.16.2");
         assert_eq!(diff_val["program_name"], "json-test-app");
         assert_eq!(diff_val["metrics"]["total_endpoints_delta"], 1);
         assert_eq!(diff_val["metrics"]["new_findings_count"], 1);
+        assert_eq!(diff_val["metrics"]["new_technologies_count"], 1);
         assert_eq!(
             diff_val["new_endpoints"][0],
             "http://127.0.0.1:8080/api/v2/new"
         );
+        assert_eq!(diff_val["new_technologies"][0]["name"], "Cloudflare");
 
         // Test unified render_diff with ReportFormat::Json
         let unified_diff_json = ReportGenerator::render_diff(ReportFormat::Json, &diff)
@@ -1280,7 +1413,7 @@ mod tests {
 
         let driver = &val["runs"][0]["tool"]["driver"];
         assert_eq!(driver["name"], "BountyScope");
-        assert_eq!(driver["version"], "0.16.1");
+        assert_eq!(driver["version"], "0.16.2");
         assert_eq!(
             driver["informationUri"],
             "https://github.com/Rohinthan/BountyScope"

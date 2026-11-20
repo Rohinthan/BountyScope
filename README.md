@@ -1,6 +1,6 @@
 # BountyScope
 
-[![Version](https://img.shields.io/badge/version-0.16.1-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.16.2-blue.svg)](Cargo.toml)
 [![CI](https://github.com/Rohinthan/BountyScope/actions/workflows/ci.yml/badge.svg)](https://github.com/Rohinthan/BountyScope/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![M8ven Score](https://m8ven.ai/badge/mcp/rohinthan-bountyscope-ewsupe?v=829cb44fcc4e4b3979377337d6e8e3d5)](https://m8ven.ai/mcp/rohinthan-bountyscope-ewsupe?s=readme)
@@ -581,8 +581,18 @@ BountyScope implements a native Model Context Protocol (MCP) server conforming t
 
 5. **`diff_latest_scans`**
    - **Input:** `{ "from_run_id": 1, "to_run_id": 2 }` (both optional; defaults to comparing the latest two scan runs)
-   - **Output:** Structured delta summary including `new_endpoints`, `removed_endpoints`, `status_changes`, `new_findings`, `resolved_findings`, and full `markdown_report`.
+   - **Output:** Structured delta summary including `new_endpoints`, `removed_endpoints`, `status_changes`, `new_findings`, `resolved_findings`, `new_technologies`, `removed_technologies`, and full `markdown_report`.
    - **Function:** Computes regressions and attack surface differences between historical scan runs.
+
+6. **`validate_scope`**
+   - **Input:** `{ "config_yaml": "...", "strict": true }` (both optional; defaults to active server configuration in strict mode)
+   - **Output:** `{ "valid": true, "strict": true, "program_name": "...", "errors": [], "warnings": [] }`
+   - **Function:** Validates scope configuration syntax and evaluates strict operator safety guardrails.
+
+7. **`list_detected_technologies`**
+   - **Input:** `{ "category": "WafCdn" }` (optional filter: `WafCdn`, `WebServer`, `Framework`, `Cms`, `HostingPlatform`)
+   - **Output:** Array of passively identified technologies (`name`, `category`, `version`, `evidence`, `endpoint`).
+   - **Function:** Queries passively fingerprinted technologies, web servers, and reverse-proxy infrastructure stored in SQLite.
 
 ### MCP Client Configuration
 

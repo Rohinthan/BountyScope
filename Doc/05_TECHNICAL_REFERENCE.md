@@ -1,6 +1,6 @@
 # BountyScope Consolidated Technical Reference
 
-**Document Version:** 0.16.1  
+**Document Version:** 0.16.2  
 **Specification Level:** Final Technical Reference  
 **Applicability:** `bountyscope` CLI and Core Subsystems  
 
@@ -376,7 +376,7 @@ BountyScope features two standardized machine-readable exporters:
    - Also implemented for `bountyscope diff --format json`, rendering structured regression metrics, endpoint additions/removals, status transitions, and newly identified security issues.
 2. **OASIS SARIF v2.1.0 (`--format sarif`):**
    - Implements OASIS Static Analysis Results Interchange Format (version 2.1.0) conforming to `https://json.schemastore.org/sarif-2.1.0.json`.
-   - Driver Component: `runs[0].tool.driver` contains name `"BountyScope"`, version `"0.16.1"`, information URI, and deduplicated `rules[]` entries with title descriptions, full descriptions, and remediation guidance.
+   - Driver Component: `runs[0].tool.driver` contains name `"BountyScope"`, version `"0.16.2"`, information URI, and deduplicated `rules[]` entries with title descriptions, full descriptions, and remediation guidance.
    - Severity-to-Level Mapping:
      - `CRITICAL` / `HIGH` -> `"error"` (`security-severity: "9.0"` / `"7.0"`)
      - `MEDIUM` -> `"warning"` (`security-severity: "5.0"`)
@@ -551,4 +551,64 @@ The linter also emits warnings to guide operators toward safe assessment practic
   ```
 - **MCP Tool:** The `validate_scope` tool accepts optional `config_yaml: string` and `strict: boolean` parameters, returning the structured `ScopeLintReport` to AI agents during automated triage sessions.
 - **MCP Tool Annotations:** Every MCP tool explicitly signals standard capability hints (`read_only_hint: true`, `destructive_hint: false`, `idempotent_hint: true`, and `open_world_hint: false`) in `ToolAnnotations` so consuming AI systems and MCP clients operate with verified safety invariants.
+
+---
+
+## 12. Passive Tech-Stack & WAF/CDN Fingerprinting (v0.16.2)
+
+BountyScope v0.16.2 introduces a zero-network-I/O passive technology, framework, web server, and WAF/CDN fingerprinting subsystem. It inspects only HTTP response status codes, headers, `Set-Cookie` names, and HTML body/meta tags already fetched during surface mapping—without initiating any extra network requests.
+
+### 12.1 Taxonomy & Categories (`TechCategory`)
+
+Detected technologies are categorized into five distinct architectural layers:
+
+1. **`WafCdn` (Web Application Firewall / Content Delivery Network):**
+   - Cloudflare: `cf-ray`, `cf-cache-status`, `__cf_bm` cookie name.
+   - AWS CloudFront: `x-amz-cf-id`, `x-amz-cf-pop`, `via: cloudfront`.
+   - Akamai: `x-akamai-transformed`, `akamai-origin-hop`, `x-akamai-request-id`.
+   - Fastly: `x-fastly-request-id`, `fastly-debug-digest`.
+   - Incapsula / Imperva: `x-iinfo`, `visid_incap` cookie name.
+
+2. **`WebServer` (HTTP Servers & Reverse Proxies):**
+   - Nginx, Apache HTTP Server, Microsoft-IIS, Caddy, OpenResty, LiteSpeed, Traefik, Envoy (detected via `Server` header banners and server tokens).
+
+3. **`Framework` (Application Frameworks & Runtimes):**
+   - Express: `x-powered-by: express`.
+   - Next.js: `x-powered-by: Next.js`, `__NEXT_DATA__` HTML marker.
+   - Django: `csrftoken` cookie name, Django debug / admin signatures.
+   - Ruby on Rails: `x-rack-cache`, `_session_id` cookie naming pattern.
+   - ASP.NET: `x-aspnet-version`, `x-aspnetmvc-version`, `ASP.NET_SessionId` cookie name.
+   - Laravel: `x-powered-by: PHP`, `laravel_session` cookie name.
+   - Spring Boot: `x-application-context`, standard Whitelabel Error Page markup.
+   - Vue.js / React / Angular: Identified via client-side DOM root markers (`data-v-`, `data-reactroot`, `ng-version`).
+
+4. **`Cms` (Content Management Systems):**
+   - WordPress: `<meta name="generator" content="WordPress ...">`, `/wp-content/` and `/wp-includes/` resource paths.
+   - Drupal: `x-generator: Drupal`, `drupal.js` asset references.
+   - Joomla: `<meta name="generator" content="Joomla! ...">`.
+
+5. **`HostingPlatform` (PaaS & Cloud Hosting Platforms):**
+   - Vercel: `x-vercel-id`, `x-vercel-cache`.
+   - Netlify: `x-nf-request-id`, `server: Netlify`.
+   - Fly.io: `fly-request-id`.
+   - Heroku: `via: ... vegur`.
+   - GitHub Pages: `server: GitHub.com`.
+
+### 12.2 Security & Credential Masking Guarantees
+
+- **Cookie Secret Isolation:** Passive fingerprinting strictly extracts cookie names (the substring preceding the first `=` sign in `Set-Cookie`). Raw session tokens, cryptographic cookies, and user secrets (e.g., `PHPSESSID=secret123`, `jwt=eyJ...`) are never copied or persisted into evidence fields or report outputs.
+- **Zero Additional Network I/O:** The engine operates in-memory on HTTP probe responses already captured by `SurfaceMapper`. It does not send active probes, options queries, or synthetic fuzzing payloads.
+
+### 12.3 Storage, Reporting, and MCP Integration
+
+- **SQLite Schema Migration (`PRAGMA user_version = 3`):**
+  - Stored in the `detected_technologies` table with `UNIQUE(program_id, name, category)` ensuring deterministic per-program deduplication across endpoints.
+  - Included as `item_type = 'technology'` in scan snapshot records.
+- **Reports:**
+  - Markdown: Generates a structured table in `## Detected Technology Stack` and delta summaries in `## Technologies & Infrastructure Changes`.
+  - JSON: Serialized into `detected_technologies` array on `JsonReport` and `new_technologies` / `removed_technologies` on `JsonDiffReport`.
+- **MCP Server:**
+  - Added `list_detected_technologies` tool with explicit `ToolAnnotations` (`read_only_hint: true`, `destructive_hint: false`, `idempotent_hint: true`, `open_world_hint: false`).
+  - Added detected technology regression metrics to `diff_latest_scans` outputs.
+
 

@@ -202,7 +202,12 @@ async fn test_offline_verification_runner_and_report_generation() {
         .get_endpoints_for_program(&program_id)
         .expect("get endpoints failed");
 
-    let report_md = ReportGenerator::generate_markdown(&program, &config, &endpoints, &findings);
+    let techs = storage
+        .get_detected_technologies_for_program(&program_id)
+        .expect("get technologies failed");
+
+    let report_md =
+        ReportGenerator::generate_markdown(&program, &config, &endpoints, &findings, &techs);
 
     assert!(report_md.contains("# Security Assessment Report: verification-lab-app"));
     assert!(report_md.contains("## Severity Breakdown"));

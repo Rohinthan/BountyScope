@@ -5,6 +5,34 @@ All notable changes to BountyScope will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.2] - 2026-11-20
+
+### Added
+- **Passive Tech-Stack & WAF/CDN Fingerprinting Engine (`src/fingerprint/`):**
+  - Zero-network-I/O passive analysis of already-retrieved HTTP response metadata (`status`, `headers`, `Set-Cookie` names, and HTML body/meta tags) collected during surface mapping.
+  - Classifies detected technologies into 5 structured categories (`TechCategory`):
+    - `WafCdn`: Cloudflare (`cf-ray`, `cf-cache-status`), AWS CloudFront (`x-amz-cf-id`, `x-amz-cf-pop`), Akamai, Fastly, Incapsula / Imperva.
+    - `WebServer`: Nginx, Apache HTTP Server, Microsoft-IIS, Caddy, OpenResty, LiteSpeed, Traefik, Envoy.
+    - `Framework`: Express, Next.js, Django, Ruby on Rails, ASP.NET, Laravel, Spring Boot, Vue.js, React, Angular.
+    - `Cms`: WordPress (`wp-content`, generator tags), Drupal, Joomla.
+    - `HostingPlatform`: Vercel, Netlify, Fly.io, Heroku, GitHub Pages.
+  - Strict privacy & credential guardrail: raw session cookie values are never extracted or logged into evidence; only cookie names (`Set-Cookie: <name>`) and header banners are preserved.
+- **SQLite Storage & Migration (`PRAGMA user_version = 3`):**
+  - Added `detected_technologies` table with `UNIQUE(program_id, name, category)` constraint and idempotent migrations from `user_version = 2` to `3`.
+  - Added `upsert_detected_technology` and `get_detected_technologies_for_program` to `StorageEngine`.
+  - Stored technology snapshot items (`item_type = 'technology'`) in `scan_snapshot_items` during `record_scan_snapshot`.
+  - Integrated technology regression and differential analysis in `compute_diff_between_runs` (`new_technologies` and `removed_technologies`).
+- **Reporting & Surface Mapping Integration:**
+  - Added `## Detected Technology Stack` table in Markdown assessment reports.
+  - Added `## Technologies & Infrastructure Changes` in Markdown diff reports.
+  - Added `detected_technologies` array in structured JSON reports (`ReportFormat::Json`).
+  - Added `new_technologies` and `removed_technologies` arrays in structured JSON diff reports.
+  - Extended CLI commands `bountyscope scan`, `bountyscope map`, `bountyscope report`, and `bountyscope diff` to surface detected technologies.
+- **Model Context Protocol (MCP) `list_detected_technologies` Tool:**
+  - Added `list_detected_technologies` tool to `BountyScopeMcpServer` supporting optional category filtering.
+  - Registered with explicit `ToolAnnotations`: `read_only_hint: true`, `destructive_hint: false`, `idempotent_hint: true`, and `open_world_hint: false`.
+  - Updated `diff_latest_scans` MCP output to include `new_technologies` and `removed_technologies`.
+
 ## [0.16.1] - 2026-11-20
 
 ### Added

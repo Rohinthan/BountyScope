@@ -154,7 +154,9 @@ async fn test_end_to_end_mcp_session_over_duplex_stream() {
     assert!(tool_names.contains(&"list_mapped_endpoints"));
     assert!(tool_names.contains(&"list_security_findings"));
     assert!(tool_names.contains(&"generate_assessment_report"));
+    assert!(tool_names.contains(&"diff_latest_scans"));
     assert!(tool_names.contains(&"validate_scope"));
+    assert!(tool_names.contains(&"list_detected_technologies"));
 
     for tool in tools {
         let name = tool["name"].as_str().expect("name");

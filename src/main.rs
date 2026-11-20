@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "bountyscope")]
-#[command(version = "0.16.1")]
+#[command(version = "0.16.2")]
 #[command(
     about = "Automated vulnerability surface mapping and passive policy verification engine",
     long_about = "BountyScope is an automated vulnerability surface mapping and passive policy verification engine designed for authorized security assessments and bug bounty programs."
@@ -255,7 +255,7 @@ async fn main() -> Result<()> {
         }) => execute_diff(&config, &db, from, to, &output, stdout, format).await,
         Some(Commands::Mcp { config, db }) => execute_mcp(&config, &db).await,
         None => {
-            println!("BountyScope v0.16.1 - Vulnerability Surface Mapping Engine");
+            println!("BountyScope v0.16.2 - Vulnerability Surface Mapping Engine");
             println!("Run 'bountyscope --help' for available commands.");
             Ok(())
         }
@@ -546,9 +546,19 @@ async fn execute_scan(
         .get_findings_for_program(&program.id)
         .with_context(|| "Failed to query findings from database")?;
 
-    let report_content =
-        ReportGenerator::render_report(format, &program, &config, &endpoints, &findings)
-            .with_context(|| "Failed to render assessment report")?;
+    let technologies = storage
+        .get_detected_technologies_for_program(&program.id)
+        .with_context(|| "Failed to query detected technologies from database")?;
+
+    let report_content = ReportGenerator::render_report(
+        format,
+        &program,
+        &config,
+        &endpoints,
+        &findings,
+        &technologies,
+    )
+    .with_context(|| "Failed to render assessment report")?;
 
     let out_path = resolve_report_output_path(output_arg, &config.program_name, false, format)?
         .context("Report output path resolution failed")?;
@@ -670,6 +680,17 @@ async fn execute_map(config_path: &PathBuf, url_str: &str, db_arg: &Option<PathB
         );
     }
 
+    if !result.detected_technologies.is_empty() {
+        println!(
+            "Passive technologies detected: {}",
+            result.detected_technologies.len()
+        );
+        for tech in &result.detected_technologies {
+            let ver = tech.version.as_deref().unwrap_or("unknown");
+            println!("  [{}] {} (version: {})", tech.category, tech.name, ver);
+        }
+    }
+
     Ok(())
 }
 
@@ -748,9 +769,19 @@ fn execute_report(
         .get_findings_for_program(&program.id)
         .with_context(|| "Failed to query findings from database")?;
 
-    let report_content =
-        ReportGenerator::render_report(format, &program, &config, &endpoints, &findings)
-            .with_context(|| "Failed to render assessment report")?;
+    let technologies = storage
+        .get_detected_technologies_for_program(&program.id)
+        .with_context(|| "Failed to query detected technologies from database")?;
+
+    let report_content = ReportGenerator::render_report(
+        format,
+        &program,
+        &config,
+        &endpoints,
+        &findings,
+        &technologies,
+    )
+    .with_context(|| "Failed to render assessment report")?;
 
     match resolve_report_output_path(output_arg, &config.program_name, stdout, format)? {
         Some(out_path) => {
@@ -856,6 +887,32 @@ async fn execute_diff(
             println!("  Status Transitions:  {}", diff.status_changes.len());
             println!("  New Findings (Regr): {}", diff.new_findings.len());
             println!("  Resolved Findings:   {}", diff.resolved_findings.len());
+            if !diff.new_technologies.is_empty() {
+                println!(
+                    "  Newly Detected Technologies: {}",
+                    diff.new_technologies.len()
+                );
+                for tech in &diff.new_technologies {
+                    let ver = tech.version.as_deref().unwrap_or("-");
+                    println!(
+                        "    + [{}] {} (version: {}, evidence: {})",
+                        tech.category, tech.name, ver, tech.evidence
+                    );
+                }
+            }
+            if !diff.removed_technologies.is_empty() {
+                println!(
+                    "  Removed Technologies:        {}",
+                    diff.removed_technologies.len()
+                );
+                for tech in &diff.removed_technologies {
+                    let ver = tech.version.as_deref().unwrap_or("-");
+                    println!(
+                        "    - [{}] {} (version: {}, evidence: {})",
+                        tech.category, tech.name, ver, tech.evidence
+                    );
+                }
+            }
         }
         None => {
             print!("{report_content}");

@@ -1,4 +1,5 @@
 use crate::error::{MapperError, ScopeError};
+use crate::fingerprint::{DetectedTechnology, PassiveFingerprinter};
 use crate::http::ScopedHttpClient;
 use crate::scope::{ScopeEnforcer, VerifiedScopeUrl};
 use crate::storage::{EndpointEntry, StorageEngine};
@@ -26,6 +27,7 @@ pub struct SurfaceMapResult {
     pub in_scope_count: usize,
     pub out_of_scope_discarded: usize,
     pub endpoints: Vec<DiscoveredEndpoint>,
+    pub detected_technologies: Vec<DetectedTechnology>,
 }
 
 /// Passive vulnerability surface mapper.
@@ -88,6 +90,7 @@ impl<'a> SurfaceMapper<'a> {
 
         // Fetch seed target URL
         let seed_resp = self.http_client.get(seed).await?;
+        self.record_response_fingerprints(seed.as_str(), &seed_resp);
         let seed_host = seed.as_url().host_str().unwrap_or("").to_string();
         let seed_path = seed.as_url().path().to_string();
         let seed_content_type = seed_resp.content_type().map(|s| s.to_string());
@@ -180,6 +183,10 @@ impl<'a> SurfaceMapper<'a> {
         let in_scope_count = discovered_map.len();
         let total_discovered = in_scope_count + out_of_scope_discarded;
         let endpoints: Vec<DiscoveredEndpoint> = discovered_map.into_values().collect();
+        let detected_technologies = self
+            .storage
+            .get_detected_technologies_for_program(&self.program_id)
+            .unwrap_or_default();
 
         Ok(SurfaceMapResult {
             seed_url: seed.as_str().to_string(),
@@ -187,7 +194,20 @@ impl<'a> SurfaceMapper<'a> {
             in_scope_count,
             out_of_scope_discarded,
             endpoints,
+            detected_technologies,
         })
+    }
+
+    /// Passively fingerprints an HTTP response and records any detected technologies into storage.
+    fn record_response_fingerprints(&self, url: &str, resp: &crate::http::HttpProbeResponse) {
+        let body_str = resp.body_as_str().ok();
+        let detected =
+            PassiveFingerprinter::fingerprint(url, resp.status_code, &resp.headers, body_str);
+        for tech in detected {
+            let _ = self
+                .storage
+                .upsert_detected_technology(&self.program_id, &tech);
+        }
     }
 
     /// Extracts hyperlinks, external scripts, and inline JavaScript routes from HTML text.
@@ -351,6 +371,7 @@ impl<'a> SurfaceMapper<'a> {
 
             match self.http_client.get(&script_verified).await {
                 Ok(resp) => {
+                    self.record_response_fingerprints(script_verified.as_str(), &resp);
                     let status = Some(resp.status_code);
                     let size = Some(resp.body.len());
                     let ct = resp.content_type().map(|s| s.to_string());
@@ -700,6 +721,7 @@ impl<'a> SurfaceMapper<'a> {
         };
 
         if let Ok(resp) = self.http_client.get(&verified_robots).await {
+            self.record_response_fingerprints(verified_robots.as_str(), &resp);
             if resp.status_code == 200 {
                 let host = verified_robots
                     .as_url()
@@ -801,6 +823,7 @@ impl<'a> SurfaceMapper<'a> {
         };
 
         if let Ok(resp) = self.http_client.get(&verified_sitemap).await {
+            self.record_response_fingerprints(verified_sitemap.as_str(), &resp);
             if resp.status_code == 200 {
                 let ct = resp.content_type().unwrap_or("").to_ascii_lowercase();
                 if let Ok(body_str) = resp.body_as_str() {
@@ -903,6 +926,7 @@ impl<'a> SurfaceMapper<'a> {
         };
 
         if let Ok(resp) = self.http_client.get(&verified_sec).await {
+            self.record_response_fingerprints(verified_sec.as_str(), &resp);
             if resp.status_code == 200 {
                 let ct = resp.content_type().unwrap_or("").to_ascii_lowercase();
                 if let Ok(body_str) = resp.body_as_str() {
@@ -1082,6 +1106,7 @@ impl<'a> SurfaceMapper<'a> {
             };
 
             if let Ok(resp) = self.http_client.get(&verified).await {
+                self.record_response_fingerprints(verified.as_str(), &resp);
                 if resp.status_code == 200 {
                     // Soft-404 filtering rule: reject responses with HTML Content-Type
                     if let Some(ct) = resp.content_type() {
